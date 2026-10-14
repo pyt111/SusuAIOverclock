@@ -1,7 +1,20 @@
 # macOS 构建与可用性说明
 
-> 本目录是社区 fork 补丁的一部分：让「苏苏 AI超频」在 macOS 上可运行、可部署跨平台包，
-> 并对 Windows 专属包给出明确阻断原因，而不是 `spawn powershell.exe ENOENT`。
+> 本目录是 **macos 分支** 的核心：让「苏苏 AI超频」在 macOS 上可运行、可部署跨平台包与 mac 移植包，
+> 并对仍然只能跑在 Windows 的包给出明确阻断原因，而不是 `spawn powershell.exe ENOENT`。
+
+## 架构：mac 移植安装器（install-macos.mjs）
+
+官方安装器是 PowerShell / CMD，macOS 上无法运行（系统没有 `powershell`）。mac 分支的做法：
+
+1. **`macos/installers/<包>/install-macos.mjs`** —— Node 实现的等价安装器（零依赖，仅用内置模块，含 `--uninstall` / `--dry-run`）；
+2. **组装脚本**（`macos/build-macos.sh`）把它复制进 `Resources/packs/<包>/`；
+3. **应用侧接线**（`electron/core.cjs` 的 `MAC_DEPLOY_PLANS` + `macInstallerPresent()`）：
+   非 Windows 平台上，只要包目录里存在 `install-macos.mjs`，`deployPlanFor(id, packPath)` 就返回 mac 计划，
+   `buildSpawn()` 生成 `node install-macos.mjs --pack . …` 命令（解释器：系统 `node` → 兜底 Electron 自带 Node + `ELECTRON_RUN_AS_NODE=1`）；
+4. **Windows 上始终走官方 ps1 / cmd**，不受影响。
+
+没有 mac 安装器的包，仍然按原策略在卡片上显示原因并禁用按钮；即使绕过 UI 直接调用 IPC，`buildSpawn()` 也会抛出同样的可读原因。
 
 ## 包可用性（macOS）
 
@@ -9,12 +22,12 @@
 | --- | --- | --- |
 | `cursor` | ✅ 原生可用 | 安装器是 `setup.py`，装 `~/.cursor/rules` 18 条规则 + `~/.cursor-shiyi-lazy/` |
 | `claude` | ✅ 原生可用 | `install-claude.py inject`，CLAUDE.md 标记块 + rules + 86 个 SKILL.md，`verify` 全量校验 |
-| `dsh` | ⚠️ 仅手动 | 官方安装器是 PowerShell / CMD；可用包内 `materials/` 与 `plugins/` 按 README 手动部署 |
-| `opencode` / `workbuddy` / `workbuddy-ai` | ❌ 仅 Windows | 安装器为 `ps1` / `cmd`，且载荷内含 Windows 专属组件 |
+| `dsh` | ✅ 移植安装器 | `macos/installers/dsh/install-macos.mjs`（PowerShell 安装器的 Node 等价实现） |
+| `opencode` | ✅ 移植安装器 | `macos/installers/opencode/install-macos.mjs`（配置合并 + 对 mac 版 asar 打补丁） |
+| `workbuddy` / `workbuddy-ai` | ❌ 仅 Windows | 安装器为 `ps1` / `cmd`，且载荷内含 Windows 专属组件 |
 | `codex` / `codex-panghu` / `anti-gravity`（已隔离） | ❌ 仅 Windows | 同上；隔离策略与知情同意逻辑在 macOS 上照常生效 |
 
-在非 Windows 平台上，这些包会在包卡片上显示「仅支持 Windows」并禁用安装 / 卸载按钮；
-即使绕过 UI 直接调用 IPC，`buildSpawn()` 也会抛出同样的可读原因。
+在非 Windows 平台上，仍属 Windows 专属的包会在包卡片上显示「仅支持 Windows」并禁用安装 / 卸载按钮。
 
 ## 构建
 
@@ -45,8 +58,8 @@ npm run build:mac -- --resources ./resources --electron-zip ./electron-v44.4.3-d
 bash macos/build-macos.sh --resources ./resources --electron-zip ./electron-v44.4.3-darwin-x64.zip --out ./release/mac
 ```
 
-脚本会：解压运行时 → 改名 → 注入 `app.asar` / `packs` / `library` → 写 `CFBundleDisplayName` / 版本 / Bundle ID
-→ 写 `LSEnvironment`（`DANGO_PYTHON`、`PATH`）→ `xattr -cr` → ad-hoc `codesign` → 输出 `.app`。
+脚本会：解压运行时 → 改名 → 注入 `app.asar` / `packs` / `library` → **注入 mac 移植安装器（`macos/installers/<包>/` → `packs/<包>/`）**
+→ 写 `CFBundleDisplayName` / 版本 / Bundle ID → 写 `LSEnvironment`（`DANGO_PYTHON`、`PATH`）→ `xattr -cr` → ad-hoc `codesign` → 输出 `.app`。
 
 ### 4. 安装
 
@@ -68,9 +81,11 @@ open "/Applications/苏苏 AI超频.app"
 
 | 文件 | 改动 |
 | --- | --- |
-| `electron/core.cjs` | `buildSpawn()` 平台守卫（`ps1`/`cmd` 仅 Windows，抛可读原因）；`resolvePythonBin()` 非 Windows 探测 `python3`；新增 `findOnPath()`；新增 `WINDOWS_ONLY_PACKS` / `MAC_APP_BUNDLES` / `packPlatformBlockReason()`；`detectPlatform()` 增加 `/Applications/*.app` 证据（只写入 `macApp`，不写 `exePath`） |
-| `electron/main.cjs` | 包卡片 / 导入分析在非 Windows 上显示平台阻断原因；spawn `ENOENT` 兜底为可读错误 |
-| `tests/core.test.cjs` | 平台阻断与 `resolvePythonBin` 的回归测试（按平台自动跳过） |
+| `electron/core.cjs` | `buildSpawn()` 平台守卫（`ps1`/`cmd` 仅 Windows，抛可读原因）；`resolvePythonBin()` 非 Windows 探测 `python3`；`resolveNodeBin()`（系统 `node` → Electron 自带 Node）；`findOnPath()`；`WINDOWS_ONLY_PACKS` / `MAC_APP_BUNDLES` / `MAC_DEPLOY_PLANS` / `macInstallerPresent()` / `packPlatformBlockReason(id, packPath)`；`deployPlanFor(id, packPath)` 优先 mac 计划；`detectPlatform()` 增加 `/Applications/*.app` 证据（只写入 `macApp`，不写 `exePath`） |
+| `electron/main.cjs` | 包卡片 / 导入分析在非 Windows 上显示平台阻断原因（传入 packPath 判定）；spawn `ENOENT` 兜底为可读错误；子进程环境合并 `sp.env`（mac 安装器解释器需要） |
+| `macos/installers/<包>/install-macos.mjs` | mac 移植安装器（dsh / opencode），含 `--uninstall` / `--dry-run` / `--pack` / 独立测试目录支持 |
+| `macos/build-macos.sh` | 组装 + 注入 mac 安装器 + LSEnvironment + ad-hoc 签名；退出清理临时目录 |
+| `tests/core.test.cjs` | 平台阻断 / mac 计划选择 / `buildSpawn` 守卫 / `resolvePythonBin` 回归测试（按平台自动跳过） |
 | `package.json` | `npm run build:mac` 入口 |
 
 ## 已知限制

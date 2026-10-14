@@ -67,7 +67,7 @@ mv "$WORK/Electron.app" "$WORK/$NAME.app"
 APP="$WORK/$NAME.app"
 RES="$APP/Contents/Resources"
 
-echo "[2/6] 注入应用源码与素材（app.asar / packs / library）"
+echo "[2/7] 注入应用源码与素材（app.asar / packs / library）"
 cp "$RESOURCES/app.asar" "$RES/app.asar"
 if [ -d "$RESOURCES/app.asar.unpacked" ]; then
   cp -R "$RESOURCES/app.asar.unpacked" "$RES/app.asar.unpacked"
@@ -75,7 +75,24 @@ fi
 cp -R "$RESOURCES/packs" "$RES/packs"
 cp -R "$RESOURCES/library" "$RES/library"
 
-echo "[3/6] 品牌信息（名称 / 版本 / Bundle ID）"
+echo "[3/7] 注入 mac 移植安装器（macos/installers/<包>/ → packs/<包>/）"
+# 包目录里带 install-macos.mjs 时，应用在非 Windows 平台会改用它（见 electron/core.cjs）
+if [ -d "$ROOT/macos/installers" ]; then
+  for d in "$ROOT"/macos/installers/*/; do
+    [ -d "$d" ] || continue
+    pack="$(basename "$d")"
+    if [ -d "$RES/packs/$pack" ]; then
+      cp -R "$d/." "$RES/packs/$pack/"
+      echo "  $pack ← $(cd "$d" && ls | tr '\n' ' ')"
+    else
+      echo "  跳过 $pack：packs 目录下没有该包"
+    fi
+  done
+else
+  echo "  未找到 macos/installers/（跳过）"
+fi
+
+echo "[4/7] 品牌信息（名称 / 版本 / Bundle ID）"
 P="$APP/Contents/Info.plist"
 PB=/usr/libexec/PlistBuddy
 $PB -c "Set :CFBundleDisplayName $NAME" "$P"
@@ -84,7 +101,7 @@ $PB -c "Set :CFBundleShortVersionString $VERSION" "$P"
 $PB -c "Set :CFBundleVersion $VERSION" "$P"
 $PB -c 'Set :CFBundleIdentifier com.wanghan.dangodesk' "$P"
 
-echo "[4/6] 注入环境变量（DANGO_PYTHON / PATH）"
+echo "[5/7] 注入环境变量（DANGO_PYTHON / PATH）"
 PY_BIN="${DANGO_PYTHON:-}"
 if [ -z "$PY_BIN" ]; then
   if [ -x "$HOME/.pyenv/shims/python3" ]; then
@@ -103,14 +120,14 @@ else
 fi
 $PB -c "Add :LSEnvironment:PATH string /usr/local/bin:/opt/homebrew/bin:$HOME/.pyenv/shims:$HOME/.opencode/bin:/usr/bin:/bin:/usr/sbin:/sbin" "$P"
 
-echo "[5/6] 清理隔离属性 + ad-hoc 签名"
+echo "[6/7] 清理隔离属性 + ad-hoc 签名"
 xattr -cr "$APP"
 if [ "$SIGN" = "1" ]; then
   codesign --force --deep --sign - "$APP"
   codesign -v "$APP" && echo "  签名校验 OK"
 fi
 
-echo "[6/6] 输出"
+echo "[7/7] 输出"
 mkdir -p "$OUT"
 rm -rf "$OUT/$NAME.app"
 ditto "$APP" "$OUT/$NAME.app"

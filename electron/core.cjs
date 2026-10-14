@@ -1258,8 +1258,10 @@ for (const id of Object.keys(LEGACY_QUARANTINE_PLANS)) Object.freeze(LEGACY_QUAR
 for (const id of Object.keys(LEGACY_QUARANTINE_PLANS)) Object.freeze(LEGACY_QUARANTINE_PLANS[id]);
 Object.freeze(LEGACY_QUARANTINE_PLANS);
 
-/** 生效计划：隔离包在未登记同意时永远返回 DEPLOY_PLANS 里的空计划。 */
-function deployPlanFor(id) {
+/** 生效计划：隔离包在未登记同意时永远返回 DEPLOY_PLANS 里的空计划；mac 移植包优先走 mac 计划。 */
+function deployPlanFor(id, packPath) {
+  // mac 分支：包里带了移植安装器就优先用它（Windows 上始终走官方 ps1 / cmd）
+  if (process.platform !== 'win32' && macInstallerPresent(id, packPath)) return MAC_DEPLOY_PLANS[id];
   const legacy = LEGACY_QUARANTINE_PLANS[id];
   if (legacy && hasQuarantineConsent(id)) return legacy;
   return DEPLOY_PLANS[id] || {};
@@ -1271,11 +1273,11 @@ function isConsentPack(id) {
 }
 
 /**
- * 官方安装器为 Windows 专属（PowerShell / CMD）的包。
+ * 官方安装器为 Windows 专属（PowerShell / CMD）且没有 mac 移植安装器的包。
  * 它们在 macOS / Linux 上无法部署：buildSpawn 会阻断，包卡片显示 blockedReason。
- * cursor / claude 是纯 Python 安装器，跨平台可用。
+ * cursor / claude 是纯 Python 安装器，跨平台可用；dsh / opencode 走 MAC_DEPLOY_PLANS（macos 分支）。
  */
-const WINDOWS_ONLY_PACKS = new Set(['codex', 'codex-panghu', 'dsh', 'opencode', 'workbuddy', 'workbuddy-ai', 'anti-gravity']);
+const WINDOWS_ONLY_PACKS = new Set(['codex', 'codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']);
 
 /** macOS 客户端 App 包名（仅用于"已安装"证据与安装目录展示，不参与 CLI 启动）。 */
 const MAC_APP_BUNDLES = {
@@ -1288,15 +1290,61 @@ const MAC_APP_BUNDLES = {
   'anti-gravity': ['Antigravity.app']
 };
 
+/* --------------------------------------------------------------
+   macOS 移植安装器（macos 分支）
+   --------------------------------------------------------------
+   官方 ps1 / cmd 安装器在 macOS 上无法运行（系统没有 powershell）。
+   mac 分支为可移植的包提供 Node 安装器 install-macos.mjs：
+   构建脚本（macos/build-macos.sh）把它复制进对应包目录；只要包目录里存在
+   该文件，非 Windows 平台就改用它，Windows 上仍走官方脚本。 */
+const MAC_INSTALLER_FILE = 'install-macos.mjs';
+const MAC_DEPLOY_PLANS = {
+  dsh: {
+    install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.'], env: { DSH_INSTALL_NO_PAUSE: '1' } },
+    uninstall: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--uninstall'] },
+    backupDirs: [dshHome()]
+  },
+  opencode: {
+    install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.'] },
+    uninstall: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--uninstall'] },
+    backupDirs: [opencodeConfigHome()]
+  }
+};
+for (const id of Object.keys(MAC_DEPLOY_PLANS)) Object.freeze(MAC_DEPLOY_PLANS[id].backupDirs);
+for (const id of Object.keys(MAC_DEPLOY_PLANS)) Object.freeze(MAC_DEPLOY_PLANS[id]);
+Object.freeze(MAC_DEPLOY_PLANS);
+
+/** 内嵌包目录里的包路径（未给 packPath 时的判定兜底）。 */
+function embeddedPackPath(id) {
+  const def = PACKS.find((p) => p.id === id);
+  const root = embeddedPacksRoot();
+  if (!def || !root) return null;
+  const p = path.join(root, def.folder);
+  return isDirSync(p) ? p : null;
+}
+
+/** 包目录里是否带了 mac 移植安装器（未给路径时退回内嵌包目录判定）。 */
+function macInstallerPresent(id, packPath) {
+  const plan = MAC_DEPLOY_PLANS[id];
+  if (!plan) return false;
+  const dir = packPath || embeddedPackPath(id);
+  return Boolean(dir) && existsSyncPath(path.join(dir, plan.install.file));
+}
+
 /**
  * 平台可用性：返回 null 表示当前平台可用；否则返回给用户看的原因文案。
+ * packPath 可选：给了就按「包目录里有没有 mac 移植安装器」判定。
  * 与 buildSpawn 的运行时守卫同源，UI 侧（scanPack / 导入分析）也用它。
  */
-function packPlatformBlockReason(id) {
-  if (!WINDOWS_ONLY_PACKS.has(id)) return null;
+function packPlatformBlockReason(id, packPath) {
   if (process.platform === 'win32') return null;
   const osName = process.platform === 'darwin' ? 'macOS' : process.platform;
-  return `该包安装器为 PowerShell / CMD 脚本，仅支持 Windows；当前系统是 ${osName}。可用的包：cursor、claude（dsh 可参考 macos/README.md 手动部署）。`;
+  if (MAC_DEPLOY_PLANS[id]) {
+    if (macInstallerPresent(id, packPath)) return null;
+    return `该包在 ${osName} 上需要 mac 移植安装器 ${MAC_INSTALLER_FILE}，当前包目录里没有它；请用 mac 分支重新组装（见 macos/README.md）。`;
+  }
+  if (!WINDOWS_ONLY_PACKS.has(id)) return null;
+  return `该包安装器为 PowerShell / CMD 脚本，仅支持 Windows；当前系统是 ${osName}。可用的包：cursor、claude、dsh、opencode（详见 macos/README.md）。`;
 }
 
 function detectPlatform(id) {
@@ -1609,9 +1657,19 @@ function resolvePythonBin() {
   return 'python';
 }
 
+/** mac 移植安装器的解释器：优先系统 node；没有则用 Electron 自带 Node（ELECTRON_RUN_AS_NODE=1）。 */
+function resolveNodeBin() {
+  if (process.platform !== 'win32') {
+    const hit = findOnPath('node');
+    if (hit) return { cmd: hit, env: null };
+    return { cmd: process.execPath, env: { ELECTRON_RUN_AS_NODE: '1' } };
+  }
+  return { cmd: 'node', env: null };
+}
+
 function buildSpawn(script, packPath, id) {
   assertPackAllowed(id);
-  const plan = deployPlanFor(id);
+  const plan = deployPlanFor(id, packPath);
   if (!script || (script !== plan.install && script !== plan.uninstall)) throw new Error('不是该包的发布部署计划');
   assertPackSourceAllowed(id, packPath);
   const full = path.join(packPath, script.file);
@@ -1619,8 +1677,20 @@ function buildSpawn(script, packPath, id) {
 
   // 平台守卫：ps1 / cmd 安装器是 Windows 专属。非 Windows 直接给出可读原因，
   // 而不是让 spawn 抛出裸 `spawn powershell.exe ENOENT`（macOS 上的实际报错）。
-  if (script.kind !== 'py' && process.platform !== 'win32') {
-    throw new Error(packPlatformBlockReason(id) || `该包安装器为 ${script.kind || 'cmd'} 脚本，仅支持 Windows。`);
+  if (script.kind !== 'py' && script.kind !== 'node' && process.platform !== 'win32') {
+    throw new Error(packPlatformBlockReason(id, packPath) || `该包安装器为 ${script.kind || 'cmd'} 脚本，仅支持 Windows。`);
+  }
+
+  if (script.kind === 'node') {
+    // mac 移植安装器：优先系统 node；没有就用 Electron 自带 Node（ELECTRON_RUN_AS_NODE）
+    const node = resolveNodeBin();
+    return {
+      cmd: node.cmd,
+      args: [full, ...(script.args || [])],
+      env: node.env,
+      display: `node "${script.file}" ${(script.args || []).join(' ')}`.trim(),
+      input: script.input || null
+    };
   }
 
   if (script.kind === 'ps1') {
@@ -3334,6 +3404,10 @@ module.exports = {
   buildSpawn,
   packPlatformBlockReason,
   resolvePythonBin,
+  resolveNodeBin,
+  MAC_INSTALLER_FILE,
+  MAC_DEPLOY_PLANS,
+  macInstallerPresent,
   VERIFY_PROMPT,
   buildCliVerifyArgs,
   isCliVerifyInfrastructureError,

@@ -1433,17 +1433,21 @@ test('隔离构建 harness 的证据目录与期望版本必须走环境变量',
   assert.doesNotMatch(runtime, /'buildId': 'susu1/, 'runtime-proof 的 buildId 不得钉死');
 });
 
-test('非 Windows：Windows-only 包给出平台阻断原因', { skip: process.platform === 'win32' }, () => {
+test('非 Windows：平台阻断原因（Windows-only 与 mac 移植包分开判定）', { skip: process.platform === 'win32' }, () => {
   assert.strictEqual(core.packPlatformBlockReason('cursor'), null, 'cursor 跨平台可用');
   assert.strictEqual(core.packPlatformBlockReason('claude'), null, 'claude 跨平台可用');
-  for (const id of ['codex', 'codex-panghu', 'dsh', 'opencode', 'workbuddy', 'workbuddy-ai', 'anti-gravity']) {
+  for (const id of ['codex', 'codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']) {
     const reason = core.packPlatformBlockReason(id);
     assert.ok(reason && /仅支持 Windows/.test(reason), `${id} 应给出平台阻断原因，实际：${reason}`);
   }
+  // dsh / opencode 走 mac 移植安装器判定：没有安装器时给出可读原因
+  const reason = core.packPlatformBlockReason('dsh');
+  assert.ok(reason && /mac 移植安装器/.test(reason), `dsh 缺 mac 安装器时应给出原因，实际：${reason}`);
 });
 
 test('Windows：平台阻断原因恒为空', { skip: process.platform !== 'win32' }, () => {
   assert.strictEqual(core.packPlatformBlockReason('codex'), null);
+  assert.strictEqual(core.packPlatformBlockReason('dsh'), null);
 });
 
 test('非 Windows：resolvePythonBin 返回绝对路径或 python3', { skip: process.platform === 'win32' }, () => {
@@ -1456,7 +1460,7 @@ test('非 Windows：buildSpawn 阻断 ps1/cmd 安装器并给出可读原因', {
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dango-guard-'));
   const packDir = path.join(root, 'dsh-pack');
   fs.mkdirSync(packDir);
-  const plan = core.deployPlanFor('dsh');
+  const plan = core.deployPlanFor('dsh', packDir);
   assert.ok(plan.install && plan.install.file, 'dsh 应有发布安装脚本');
   for (const s of [plan.install, plan.uninstall]) {
     if (!s || !s.file) continue;
@@ -1464,7 +1468,25 @@ test('非 Windows：buildSpawn 阻断 ps1/cmd 安装器并给出可读原因', {
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, '# stub\n');
   }
-  assert.throws(() => core.buildSpawn(plan.install, packDir, 'dsh'), /仅支持 Windows/);
-  assert.throws(() => core.buildSpawn(plan.uninstall, packDir, 'dsh'), /仅支持 Windows/);
+  // 包里没有 mac 移植安装器 → 给出可读原因（而不是 ENOENT）
+  assert.throws(() => core.buildSpawn(plan.install, packDir, 'dsh'), /mac 移植安装器/);
+  assert.throws(() => core.buildSpawn(plan.uninstall, packDir, 'dsh'), /mac 移植安装器/);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('非 Windows：带 mac 移植安装器的包改走 node 计划', { skip: process.platform === 'win32' }, () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dango-macplan-'));
+  const packDir = path.join(root, 'dsh-pack');
+  fs.mkdirSync(packDir);
+  fs.writeFileSync(path.join(packDir, 'install-macos.mjs'), '// mac 移植安装器（测试桩）\n');
+  const plan = core.deployPlanFor('dsh', packDir);
+  assert.strictEqual(plan.install.file, 'install-macos.mjs', '应选中 mac 安装器');
+  assert.strictEqual(plan.install.kind, 'node', 'mac 安装器按 node 执行');
+  assert.strictEqual(core.packPlatformBlockReason('dsh', packDir), null, '带移植安装器 → 不阻断');
+  const sp = core.buildSpawn(plan.install, packDir, 'dsh');
+  assert.ok(sp && sp.args[0].endsWith('install-macos.mjs'), `应生成 node 命令，实际：${sp && sp.display}`);
+  assert.ok(sp.args.includes('--pack'), '应带上 --pack 参数');
+  const up = core.buildSpawn(plan.uninstall, packDir, 'dsh');
+  assert.ok(up && up.args.includes('--uninstall'), '卸载应带 --uninstall');
   fs.rmSync(root, { recursive: true, force: true });
 });

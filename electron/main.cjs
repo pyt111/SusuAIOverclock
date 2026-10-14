@@ -584,7 +584,7 @@ async function scanPack(state, def) {
     note: def.note,
     path: packPath,
     source: resolved.source,
-    blockedReason: core.packPlatformBlockReason(def.id) || resolved.blockedReason || null,
+    blockedReason: core.packPlatformBlockReason(def.id, packPath) || resolved.blockedReason || null,
     consentRequired: core.isConsentPack(def.id),
     consented: hasQuarantineConsent(def.id),
     consentLabel: core.isConsentPack(def.id) ? QUARANTINE_CONSENT_LABEL : null,
@@ -901,10 +901,13 @@ function registerIpc() {
     const platforms = core.detectAllPlatforms();
     const breaks = {};
     const plans = {};
+    const state = await loadState();
     for (const id of core.PACK_IDS) {
       breaks[id] = core.verifyBreak(id);
-      // 生效计划：隔离包只有登记同意后才返回旧脚本，未登记时等同空计划
-      const plan = core.deployPlanFor(id);
+      // 生效计划：隔离包只有登记同意后才返回旧脚本，未登记时等同空计划；mac 移植包按包目录判定
+      const def = core.PACKS.find((p) => p.id === id);
+      const { dir: packPath } = def ? resolvePackDir(state, def) : { dir: null };
+      const plan = core.deployPlanFor(id, packPath);
       plans[id] = {
         ...getDeployPlanInfo(id, plan),
         consentRequired: core.isConsentPack(id),
@@ -1034,7 +1037,7 @@ function registerIpc() {
       const def = core.PACKS.find((p) => p.id === id);
       const { dir: packPath, blockedReason } = resolvePackDir(state, def);
       if (!packPath) throw new Error(blockedReason || '未找到包目录（外部根目录与内嵌包都没有）');
-      const plan = core.deployPlanFor(id);
+      const plan = core.deployPlanFor(id, packPath);
       const script = action === 'install' ? plan.install : plan.uninstall;
       if (!script) throw new Error(`${def.name} 没有提供${action === 'install' ? '安装' : '卸载'}脚本`);
 
@@ -1050,7 +1053,7 @@ function registerIpc() {
         // 清掉父进程可能传入的 ELECTRON_RUN_AS_NODE，避免包内脚本调 node/electron 时退化
         const childEnv = { ...process.env };
         delete childEnv.ELECTRON_RUN_AS_NODE;
-        Object.assign(childEnv, script.env || {});
+        Object.assign(childEnv, script.env || {}, sp.env || {});
         try {
           child = spawn(sp.cmd, sp.args, {
             cwd: packPath,
@@ -1171,7 +1174,7 @@ function registerIpc() {
   ipcMain.handle('dango:analyzeImport', async (_e, inputPath) => {
     if (typeof inputPath !== 'string' || !inputPath.trim()) throw new Error('路径为空');
     const det = core.detectPackTarget(inputPath.trim());
-    if (det.platform) det.blockedReason = core.packPlatformBlockReason(det.platform) || getPackBlockReason(det.platform);
+    if (det.platform) det.blockedReason = core.packPlatformBlockReason(det.platform, det.inputKind === 'dir' ? det.path : undefined) || getPackBlockReason(det.platform);
     if (det.kind === 'single' && det.inputKind === 'dir' && det.platform) {
       det.analysis = core.analyzeImportedDir(det.path, det.platform);
       det.blockedReason = det.blockedReason || det.analysis?.blockedReason || null;
@@ -1179,7 +1182,7 @@ function registerIpc() {
     if (det.kind === 'multi-root' && Array.isArray(det.platforms)) {
       det.platforms = det.platforms.map((p) => {
         const analysis = core.analyzeImportedDir(p.path, p.platform);
-        return { ...p, analysis, blockedReason: core.packPlatformBlockReason(p.platform) || getPackBlockReason(p.platform) || analysis?.blockedReason || null };
+        return { ...p, analysis, blockedReason: core.packPlatformBlockReason(p.platform, p.path) || getPackBlockReason(p.platform) || analysis?.blockedReason || null };
       });
     }
     return det;
@@ -1268,7 +1271,7 @@ function registerIpc() {
     const state = await loadState();
     // 保留落盘历史供查看/移除，不把它当成当前允许部署的声明。
     return Object.fromEntries(Object.entries(state.imported || {}).map(([id, item]) => [id, {
-      ...item, blockedReason: core.packPlatformBlockReason(id) || getPackBlockReason(id)
+      ...item, blockedReason: core.packPlatformBlockReason(id, item.kind === 'dir' ? item.path : undefined) || getPackBlockReason(id)
     }]));
   });
 

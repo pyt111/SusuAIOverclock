@@ -6,14 +6,16 @@
 
 ---
 
-## [未发布] — macOS 可移植性（社区 fork 补丁）
+## [未发布] — macOS 分支（可移植性 + 移植安装器）
 
-> 目标：让「苏苏 AI超频」在 macOS 上可运行、可部署跨平台包，并对 Windows 专属包给出明确阻断原因，而不是 `spawn powershell.exe ENOENT`。
+> 目标：让「苏苏 AI超频」在 macOS 上可运行、可部署跨平台包与 mac 移植包（dsh / opencode），并对仍然只能跑在 Windows 的包给出明确阻断原因，而不是 `spawn powershell.exe ENOENT`。
 
 ### 新增
 
-- **`macos/build-macos.sh`**：用官方 Electron darwin 运行时 + 便携版 `resources/`（`app.asar` / `packs` / `library`）组装 macOS 应用，自动写 `LSEnvironment`（`DANGO_PYTHON` / `PATH`）并做 ad-hoc 签名。`npm run build:mac` 可直接调用。
-- **`macos/README.md`**：macOS 构建、安装与包可用性说明（哪些包原生可用、哪些仅 Windows、dsh 手动部署指引）。
+- **`macos/installers/`（mac 移植安装器）**：`dsh` 与 `opencode` 的 Node 等价安装器 `install-macos.mjs`（零依赖，仅内置模块，含 `--uninstall` / `--dry-run`）。构建时由 `macos/build-macos.sh` 注入 `Resources/packs/<包>/`。
+- **应用侧 mac 计划**：`electron/core.cjs` 新增 `MAC_DEPLOY_PLANS` / `macInstallerPresent()` / `resolveNodeBin()`；`deployPlanFor(id, packPath)` 在非 Windows 平台优先返回 mac 计划（解释器：系统 `node` → Electron 自带 Node + `ELECTRON_RUN_AS_NODE=1`），Windows 上始终走官方脚本。
+- **`macos/build-macos.sh`**：用官方 Electron darwin 运行时 + 便携版 `resources/`（`app.asar` / `packs` / `library`）组装 macOS 应用，注入 mac 安装器、自动写 `LSEnvironment`（`DANGO_PYTHON` / `PATH`）并做 ad-hoc 签名。`npm run build:mac` 可直接调用。
+- **`macos/README.md`**：macOS 构建、安装与包可用性说明（架构、逐包状态、构建步骤）。
 
 ### 修复
 
@@ -21,6 +23,7 @@
 - **macOS / Linux 上 `resolvePythonBin()` 回退到不存在的 `python`**：非 Windows 改为按 `python3 → python` 探测 `PATH`（`DANGO_PYTHON` 仍最优先）。
 - **macOS 客户端识别**：`detectPlatform()` 增加 `/Applications/*.app` 证据（Cursor / Claude / OpenCode / WorkBuddy 等），仅用于「已安装」判定与安装目录展示，不写入 `exePath`（避免把 GUI 应用当 CLI 拉起）。
 - **spawn `ENOENT` 兜底**：部署子进程启动失败时给出「未找到 Python 解释器 / 可执行文件」的可读错误。
+- **`packPlatformBlockReason(id, packPath)` 按包目录判定**：`dsh` / `opencode` 在包里带 `install-macos.mjs` 时不再阻断；仍属 Windows 专属的包（`codex` / `codex-panghu` / `anti-gravity` / `workbuddy` / `workbuddy-ai`）保持「仅支持 Windows」的明确阻断。
 
 ---
 
