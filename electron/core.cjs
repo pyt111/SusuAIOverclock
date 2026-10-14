@@ -1300,7 +1300,7 @@ const MAC_APP_BUNDLES = {
 const MAC_INSTALLER_FILE = 'install-macos.mjs';
 const MAC_DEPLOY_PLANS = {
   dsh: {
-    install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.'], env: { DSH_INSTALL_NO_PAUSE: '1' } },
+    install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--no-open-links'], env: { DSH_INSTALL_NO_PAUSE: '1' } },
     uninstall: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--uninstall'] },
     backupDirs: [dshHome()]
   },
