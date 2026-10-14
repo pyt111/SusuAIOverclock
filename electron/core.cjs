@@ -568,6 +568,20 @@ function existsSyncPath(p) {
   }
 }
 
+/** 在 PATH 上查找可执行文件（POSIX 语义，用于 macOS / Linux 的 python3 探测）。 */
+function findOnPath(name) {
+  const dirs = String(process.env.PATH || '').split(path.delimiter);
+  for (const dir of dirs) {
+    if (!dir) continue;
+    const full = path.join(dir, name);
+    try {
+      fs.accessSync(full, fs.constants.X_OK);
+      if (fs.statSync(full).isFile()) return full;
+    } catch { /* 继续下一个目录 */ }
+  }
+  return null;
+}
+
 function isDirSync(p) {
   try {
     return fs.statSync(p).isDirectory();
@@ -1256,6 +1270,35 @@ function isConsentPack(id) {
   return Object.prototype.hasOwnProperty.call(QUARANTINED_PACKS, id);
 }
 
+/**
+ * 官方安装器为 Windows 专属（PowerShell / CMD）的包。
+ * 它们在 macOS / Linux 上无法部署：buildSpawn 会阻断，包卡片显示 blockedReason。
+ * cursor / claude 是纯 Python 安装器，跨平台可用。
+ */
+const WINDOWS_ONLY_PACKS = new Set(['codex', 'codex-panghu', 'dsh', 'opencode', 'workbuddy', 'workbuddy-ai', 'anti-gravity']);
+
+/** macOS 客户端 App 包名（仅用于"已安装"证据与安装目录展示，不参与 CLI 启动）。 */
+const MAC_APP_BUNDLES = {
+  codex: ['Codex.app'],
+  cursor: ['Cursor.app'],
+  claude: ['Claude.app'],
+  opencode: ['OpenCode.app'],
+  workbuddy: ['WorkBuddy.app'],
+  'workbuddy-ai': ['WorkBuddy AI.app', 'WorkBuddyAI.app'],
+  'anti-gravity': ['Antigravity.app']
+};
+
+/**
+ * 平台可用性：返回 null 表示当前平台可用；否则返回给用户看的原因文案。
+ * 与 buildSpawn 的运行时守卫同源，UI 侧（scanPack / 导入分析）也用它。
+ */
+function packPlatformBlockReason(id) {
+  if (!WINDOWS_ONLY_PACKS.has(id)) return null;
+  if (process.platform === 'win32') return null;
+  const osName = process.platform === 'darwin' ? 'macOS' : process.platform;
+  return `该包安装器为 PowerShell / CMD 脚本，仅支持 Windows；当前系统是 ${osName}。可用的包：cursor、claude（dsh 可参考 macos/README.md 手动部署）。`;
+}
+
 function detectPlatform(id) {
   const probe = PLATFORM_PROBES[id];
   const out = {
@@ -1266,7 +1309,8 @@ function detectPlatform(id) {
     exePath: null,
     exeVia: null,
     configDirs: [],
-    iconPath: null
+    iconPath: null,
+    macApp: null
   };
   if (!probe) return out;
 
@@ -1327,8 +1371,21 @@ function detectPlatform(id) {
     if (isDirSync(c) && !out.configDirs.includes(c)) out.configDirs.push(c);
   }
 
+  // macOS：/Applications 下的客户端 App 包作为「已安装」证据与安装目录展示。
+  // 只写入 macApp，不写 exePath —— 避免 L3/L4 把 GUI 应用当 CLI 拉起。
+  if (process.platform === 'darwin') {
+    for (const bundle of MAC_APP_BUNDLES[id] || []) {
+      const full = path.join('/Applications', bundle);
+      if (isDirSync(full)) {
+        if (!out.installDir) out.installDir = full;
+        out.macApp = full;
+        break;
+      }
+    }
+  }
+
   // 没有 exe 但有配置目录也算装过（DSH 走 npx）
-  out.installed = Boolean(out.exePath || out.configDirs.length || out.exeVia === 'process');
+  out.installed = Boolean(out.exePath || out.configDirs.length || out.exeVia === 'process' || out.macApp);
   return out;
 }
 
@@ -1541,6 +1598,14 @@ function resolvePythonBin() {
     path.join(HOME, '.workbuddy', 'binaries', 'python', 'versions', '3.12.8', 'python.exe')
   ];
   for (const p of wb) if (existsSyncPath(p)) return p;
+  if (process.platform !== 'win32') {
+    // macOS / Linux：优先探测 PATH 上的 python3，再退 python；DANGO_PYTHON 仍最优先。
+    for (const name of ['python3', 'python']) {
+      const hit = findOnPath(name);
+      if (hit) return hit;
+    }
+    return 'python3';
+  }
   return 'python';
 }
 
@@ -1551,6 +1616,12 @@ function buildSpawn(script, packPath, id) {
   assertPackSourceAllowed(id, packPath);
   const full = path.join(packPath, script.file);
   if (!existsSyncPath(full)) return null;
+
+  // 平台守卫：ps1 / cmd 安装器是 Windows 专属。非 Windows 直接给出可读原因，
+  // 而不是让 spawn 抛出裸 `spawn powershell.exe ENOENT`（macOS 上的实际报错）。
+  if (script.kind !== 'py' && process.platform !== 'win32') {
+    throw new Error(packPlatformBlockReason(id) || `该包安装器为 ${script.kind || 'cmd'} 脚本，仅支持 Windows。`);
+  }
 
   if (script.kind === 'ps1') {
     const args = ['-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', full, ...(script.args || [])];
@@ -3261,6 +3332,8 @@ module.exports = {
   verifyBreak,
   checkEvidence,
   buildSpawn,
+  packPlatformBlockReason,
+  resolvePythonBin,
   VERIFY_PROMPT,
   buildCliVerifyArgs,
   isCliVerifyInfrastructureError,

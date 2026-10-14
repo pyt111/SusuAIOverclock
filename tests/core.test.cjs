@@ -1432,3 +1432,39 @@ test('隔离构建 harness 的证据目录与期望版本必须走环境变量',
   assert.match(runtime, /os\.environ\.get\('ISOLATED_BUILD_DOWNLOADS'/, '下载缓存目录必须可覆盖');
   assert.doesNotMatch(runtime, /'buildId': 'susu1/, 'runtime-proof 的 buildId 不得钉死');
 });
+
+test('非 Windows：Windows-only 包给出平台阻断原因', { skip: process.platform === 'win32' }, () => {
+  assert.strictEqual(core.packPlatformBlockReason('cursor'), null, 'cursor 跨平台可用');
+  assert.strictEqual(core.packPlatformBlockReason('claude'), null, 'claude 跨平台可用');
+  for (const id of ['codex', 'codex-panghu', 'dsh', 'opencode', 'workbuddy', 'workbuddy-ai', 'anti-gravity']) {
+    const reason = core.packPlatformBlockReason(id);
+    assert.ok(reason && /仅支持 Windows/.test(reason), `${id} 应给出平台阻断原因，实际：${reason}`);
+  }
+});
+
+test('Windows：平台阻断原因恒为空', { skip: process.platform !== 'win32' }, () => {
+  assert.strictEqual(core.packPlatformBlockReason('codex'), null);
+});
+
+test('非 Windows：resolvePythonBin 返回绝对路径或 python3', { skip: process.platform === 'win32' }, () => {
+  const bin = core.resolvePythonBin();
+  assert.ok(bin === 'python3' || path.isAbsolute(bin), `应返回绝对路径或 python3，实际：${bin}`);
+});
+
+test('非 Windows：buildSpawn 阻断 ps1/cmd 安装器并给出可读原因', { skip: process.platform === 'win32' }, () => {
+  // 回归：macOS 上安装隔离的 Codex 旧载荷曾报 `spawn powershell.exe ENOENT`
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dango-guard-'));
+  const packDir = path.join(root, 'dsh-pack');
+  fs.mkdirSync(packDir);
+  const plan = core.deployPlanFor('dsh');
+  assert.ok(plan.install && plan.install.file, 'dsh 应有发布安装脚本');
+  for (const s of [plan.install, plan.uninstall]) {
+    if (!s || !s.file) continue;
+    const full = path.join(packDir, s.file);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, '# stub\n');
+  }
+  assert.throws(() => core.buildSpawn(plan.install, packDir, 'dsh'), /仅支持 Windows/);
+  assert.throws(() => core.buildSpawn(plan.uninstall, packDir, 'dsh'), /仅支持 Windows/);
+  fs.rmSync(root, { recursive: true, force: true });
+});

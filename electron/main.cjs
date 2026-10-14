@@ -584,7 +584,7 @@ async function scanPack(state, def) {
     note: def.note,
     path: packPath,
     source: resolved.source,
-    blockedReason: resolved.blockedReason || null,
+    blockedReason: core.packPlatformBlockReason(def.id) || resolved.blockedReason || null,
     consentRequired: core.isConsentPack(def.id),
     consented: hasQuarantineConsent(def.id),
     consentLabel: core.isConsentPack(def.id) ? QUARANTINE_CONSENT_LABEL : null,
@@ -1074,7 +1074,16 @@ function registerIpc() {
         }
         child.stdout.on('data', (b) => emitLog({ id, action, kind: 'out', line: decodeBuf(b) }));
         child.stderr.on('data', (b) => emitLog({ id, action, kind: 'err', line: decodeBuf(b) }));
-        child.on('error', (e) => reject(e));
+        child.on('error', (e) => {
+          if (e && e.code === 'ENOENT') {
+            const what = script.kind === 'py'
+              ? 'Python 解释器（请安装 Python 3，或用 DANGO_PYTHON 环境变量指定路径）'
+              : `可执行文件「${sp.cmd}」`;
+            reject(new Error(`启动失败：系统中未找到 ${what}。`));
+            return;
+          }
+          reject(e);
+        });
         child.on('close', (c) => resolve(c));
       });
 
@@ -1162,7 +1171,7 @@ function registerIpc() {
   ipcMain.handle('dango:analyzeImport', async (_e, inputPath) => {
     if (typeof inputPath !== 'string' || !inputPath.trim()) throw new Error('路径为空');
     const det = core.detectPackTarget(inputPath.trim());
-    if (det.platform) det.blockedReason = getPackBlockReason(det.platform);
+    if (det.platform) det.blockedReason = core.packPlatformBlockReason(det.platform) || getPackBlockReason(det.platform);
     if (det.kind === 'single' && det.inputKind === 'dir' && det.platform) {
       det.analysis = core.analyzeImportedDir(det.path, det.platform);
       det.blockedReason = det.blockedReason || det.analysis?.blockedReason || null;
@@ -1170,7 +1179,7 @@ function registerIpc() {
     if (det.kind === 'multi-root' && Array.isArray(det.platforms)) {
       det.platforms = det.platforms.map((p) => {
         const analysis = core.analyzeImportedDir(p.path, p.platform);
-        return { ...p, analysis, blockedReason: getPackBlockReason(p.platform) || analysis?.blockedReason || null };
+        return { ...p, analysis, blockedReason: core.packPlatformBlockReason(p.platform) || getPackBlockReason(p.platform) || analysis?.blockedReason || null };
       });
     }
     return det;
@@ -1259,7 +1268,7 @@ function registerIpc() {
     const state = await loadState();
     // 保留落盘历史供查看/移除，不把它当成当前允许部署的声明。
     return Object.fromEntries(Object.entries(state.imported || {}).map(([id, item]) => [id, {
-      ...item, blockedReason: getPackBlockReason(id)
+      ...item, blockedReason: core.packPlatformBlockReason(id) || getPackBlockReason(id)
     }]));
   });
 

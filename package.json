@@ -23,6 +23,7 @@
     "audit:security": "node scripts/collect-security-evidence.cjs",
     "patch:portable": "node scripts/apply-portable-patch.cjs",
     "pack:portable": "node scripts/preflight-security.cjs && npm run patch:portable && vite build && node scripts/pack-portable.cjs",
+    "build:mac": "bash macos/build-macos.sh",
     "scrape:library": "node scripts/scrape-details.cjs",
     "snapshot:library": "node scripts/build-library-snapshot.cjs",
     "refresh:library": "npm run scrape:library && npm run snapshot:library"

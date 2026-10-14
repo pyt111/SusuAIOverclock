@@ -6,6 +6,24 @@
 
 ---
 
+## [未发布] — macOS 可移植性（社区 fork 补丁）
+
+> 目标：让「苏苏 AI超频」在 macOS 上可运行、可部署跨平台包，并对 Windows 专属包给出明确阻断原因，而不是 `spawn powershell.exe ENOENT`。
+
+### 新增
+
+- **`macos/build-macos.sh`**：用官方 Electron darwin 运行时 + 便携版 `resources/`（`app.asar` / `packs` / `library`）组装 macOS 应用，自动写 `LSEnvironment`（`DANGO_PYTHON` / `PATH`）并做 ad-hoc 签名。`npm run build:mac` 可直接调用。
+- **`macos/README.md`**：macOS 构建、安装与包可用性说明（哪些包原生可用、哪些仅 Windows、dsh 手动部署指引）。
+
+### 修复
+
+- **非 Windows 平台部署 Windows 专属包时报 `spawn powershell.exe ENOENT`**：`buildSpawn()` 现在按平台校验脚本类型（`ps1` / `cmd` 仅 Windows），非 Windows 直接抛出可读原因；`scanPack()` 与导入分析（`dango:analyzeImport` / `dango:listImports`）在包卡片上给出 `blockedReason`，安装 / 卸载按钮禁用并显示「仅支持 Windows」。
+- **macOS / Linux 上 `resolvePythonBin()` 回退到不存在的 `python`**：非 Windows 改为按 `python3 → python` 探测 `PATH`（`DANGO_PYTHON` 仍最优先）。
+- **macOS 客户端识别**：`detectPlatform()` 增加 `/Applications/*.app` 证据（Cursor / Claude / OpenCode / WorkBuddy 等），仅用于「已安装」判定与安装目录展示，不写入 `exePath`（避免把 GUI 应用当 CLI 拉起）。
+- **spawn `ENOENT` 兜底**：部署子进程启动失败时给出「未找到 Python 解释器 / 可执行文件」的可读错误。
+
+---
+
 ## [1.5.7] — 2026-09-21 · 隔离包载荷内置 + 中文文件名修复（修复勾选同意后仍无法安装）
 
 ### 修复
