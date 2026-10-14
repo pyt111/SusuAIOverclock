@@ -56,6 +56,8 @@ echo "应用：$NAME $VERSION"
 
 echo "[1/6] 解压 Electron 运行时"
 WORK="$(mktemp -d /tmp/susu-mac-build.XXXXXX)"
+# 退出时清理临时构建目录（失败也清）
+trap 'rm -rf "$WORK"' EXIT
 ditto -x -k "$ELECTRON_ZIP" "$WORK"
 if [ ! -d "$WORK/Electron.app" ]; then
   echo "Electron 压缩包里没有 Electron.app（应使用 darwin 版）" >&2
