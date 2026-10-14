@@ -102,3 +102,5 @@ open "/Applications/苏苏 AI超频.app"
 - `claude` 包：`inject` 写入 88 个文件，`verify` 88/88 通过。
 - 修复前：安装隔离的 Codex 旧载荷报 `Error invoking remote method 'dango:deploy': Error: spawn powershell.exe ENOENT`；
   修复后：包卡片直接显示「仅支持 Windows」并禁用按钮。
+- mac 安装器（dsh）：`selftest.sh` 全流程 ALL PASS（安装 / 幂等重装 / 卸载回滚 / 重装）；应用内 `dango:detect` 返回 `installFile=install-macos.mjs`，卡片三按钮可用；应用资源内 `--dry-run` 演练识别真实运行时 0.2.1-alpha.1、零写入。
+- mac 安装器（opencode）：对 OpenCode.app 副本打补丁 **3598/3598 逐文件校验通过**、幂等、`--uninstall` 还原到与原版逐字节一致；真实 `/Applications/OpenCode.app` 的 sha256 与代码签名未被改动。
