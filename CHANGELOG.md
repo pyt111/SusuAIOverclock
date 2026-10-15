@@ -12,18 +12,28 @@
 
 ### 新增
 
-- **`macos/installers/`（mac 移植安装器）**：`dsh` 与 `opencode` 的 Node 等价安装器 `install-macos.mjs`（零依赖，仅内置模块，含 `--uninstall` / `--dry-run`）。构建时由 `macos/build-macos.sh` 注入 `Resources/packs/<包>/`。
-- **应用侧 mac 计划**：`electron/core.cjs` 新增 `MAC_DEPLOY_PLANS` / `macInstallerPresent()` / `resolveNodeBin()`；`deployPlanFor(id, packPath)` 在非 Windows 平台优先返回 mac 计划（解释器：系统 `node` → Electron 自带 Node + `ELECTRON_RUN_AS_NODE=1`），Windows 上始终走官方脚本。
+- **`macos/installers/`（mac 移植安装器）**：`dsh`、`opencode` 与 `codex` 的 Node 等价安装器 `install-macos.mjs`（零依赖，仅内置模块，含 `--uninstall` / `--dry-run`）。构建时由 `macos/build-macos.sh` 注入 `Resources/packs/<包>/`。
+- **`codex` 破甲包 mac 移植**：`install-replica.ps1`（1893 行）的 Node 等价实现。逐条对齐原版步骤 —— preflight（材料齐备 / python3 / Codex 未运行守卫）、`[1.5/9]` app.asar 命名空间补丁、`[2/9]` config.toml 只备份不改、`[3/9]` AGENTS.md 标记块外科手术（剥离 9 个 Legacy 块 + 保留外部块，写后丢失即拒绝）、`[4/9]` hooks.json 合并（命令改写为 `python3 "<codexHome>/hooks/…"`、剔除旧托管条目）、`[5/9]` hook 脚本 + prompts + eni-solo + models.json、`[6/9]` skills 分阶段安装、`[7/9]` slo-runtime + 路径适配、`[8/9]` hook 信任同步（`Sync-HookTrust.py`）、`[9/9]` 自检 + 安装清单。卸载器对齐 `Uninstall.ps1`（按清单反向恢复 + `--purge`）。**`--skip-astra6` 默认跳过 Astra6 号池中间件**（未移植，见 `macos/README.md`）。
+- **应用侧 mac 计划**：`electron/core.cjs` 新增 `MAC_DEPLOY_PLANS` / `macInstallerPresent()` / `resolveNodeBin()`；`deployPlanFor(id, packPath)` 在非 Windows 平台优先返回 mac 计划（解释器：系统 `node` → Electron 自带 Node + `ELECTRON_RUN_AS_NODE=1`），Windows 上始终走官方脚本。`codex` 加入 `MAC_DEPLOY_PLANS`（参数对齐 Windows 计划 `-NoOpenLinks -SkipAstra6`），并从 `WINDOWS_ONLY_PACKS` 移除；**隔离包身份不变**，未勾选知情同意时 `assertPackAllowed()` 仍照常拦截。
 - **`macos/build-macos.sh`**：用官方 Electron darwin 运行时 + 便携版 `resources/`（`app.asar` / `packs` / `library`）组装 macOS 应用，注入 mac 安装器、自动写 `LSEnvironment`（`DANGO_PYTHON` / `PATH`）并做 ad-hoc 签名。`npm run build:mac` 可直接调用。
 - **`macos/README.md`**：macOS 构建、安装与包可用性说明（架构、逐包状态、构建步骤）。
 
 ### 修复
 
+- **codex 破甲包自带 3 个带 UTF-8 BOM 的 `SKILL.md` —— 每次会话刷 ERROR 且技能被静默丢弃。** codex 的 `session_init` 用严格解析器读 skills，要求文件首字符就是 frontmatter 定界符 `---`；文件以 `EF BB BF` 开头时 codex 报 `failed to load skill … missing YAML frontmatter delimited by ---` 并**丢弃该技能**（用户可见表现是「创建会话失败」）。
+  - 手工核对：包内 `materials/skills/zzy-codex5.6/zzy-reverse-skill/skills/{js-reverse,docs-generator,browser-automation}/SKILL.md` 三个文件带 BOM，装完直接丢失。
+  - **Windows 版同样中招**：包内自带 `Fix-SkillFrontmatter.ps1`，但 `install-replica.ps1` 从不调用它（`Install-All.cmd` / `Install-OneClick.cmd` 也没有），所以那个修复器在真实安装里从未跑过。
+  - 修法：mac 安装器在 skills 分阶段安装的 **stage 目录**上就地剥离（不污染包源，只删前 3 字节、正文逐字节保留、原子替换、保留权限、不跟随符号链接），并在 manifest 写 `skill_bom_fixed` 留证。实测 `skill_bom_fixed: 3`，codex 实跑零 ERROR。
+- **深度验证把上游服务故障误报成「启动参数拦截」。** `isCliVerifyInfrastructureError()` 的正则含 `reading additional input from stdin` —— 而 codex 在非 TTY 下**恒会打印**这行提示（不是错误）。判定一旦混入它，真实的上游 503 / 网络故障就会被归类成「参数拦截」，把用户引向排查安装。
+  - 修法：从正则里移除该提示语；新增 `isCliUpstreamError()` 单独识别 `Reconnecting...` / HTTP 429/5xx / `ECONNREFUSED` 等上游与网络故障，L4 先判上游、给出「上游服务不可用（非安装问题，换时间重试）」。实测：安装完成后 L1–L3 全通过，L4 正确归因为上游不可用。
+
 - **非 Windows 平台部署 Windows 专属包时报 `spawn powershell.exe ENOENT`**：`buildSpawn()` 现在按平台校验脚本类型（`ps1` / `cmd` 仅 Windows），非 Windows 直接抛出可读原因；`scanPack()` 与导入分析（`dango:analyzeImport` / `dango:listImports`）在包卡片上给出 `blockedReason`，安装 / 卸载按钮禁用并显示「仅支持 Windows」。
 - **macOS / Linux 上 `resolvePythonBin()` 回退到不存在的 `python`**：非 Windows 改为按 `python3 → python` 探测 `PATH`（`DANGO_PYTHON` 仍最优先）。
+- **macOS 上 `findCodexCliInfo()` 只认 `codex.exe` / `codex.cmd`，深度验证卡在 L3。** mac 的 codex CLI 是无扩展名的 node 垫片（`/usr/local/bin/codex`、`~/.codex/bin/codex`、Homebrew 位），Windows 形态的探测全部落空 → L3 报「未找到 codex CLI 或桌面客户端」。
+  - 修法：非 Windows 增加无扩展名 `codex` 候选（`PATH` 逐目录 + `~/.codex/bin`、`/usr/local/bin`、`/opt/homebrew/bin`、`~/.npm-global/bin`、`~/.local/bin`）。实测修复后 L3 通过并报出 `codex-cli 0.162.1`。
 - **macOS 客户端识别**：`detectPlatform()` 增加 `/Applications/*.app` 证据（Cursor / Claude / OpenCode / WorkBuddy 等），仅用于「已安装」判定与安装目录展示，不写入 `exePath`（避免把 GUI 应用当 CLI 拉起）。
 - **spawn `ENOENT` 兜底**：部署子进程启动失败时给出「未找到 Python 解释器 / 可执行文件」的可读错误。
-- **`packPlatformBlockReason(id, packPath)` 按包目录判定**：`dsh` / `opencode` 在包里带 `install-macos.mjs` 时不再阻断；仍属 Windows 专属的包（`codex` / `codex-panghu` / `anti-gravity` / `workbuddy` / `workbuddy-ai`）保持「仅支持 Windows」的明确阻断。
+- **`packPlatformBlockReason(id, packPath)` 按包目录判定**：`dsh` / `opencode` / `codex` 在包里带 `install-macos.mjs` 时不再阻断；仍属 Windows 专属的包（`codex-panghu` / `anti-gravity` / `workbuddy` / `workbuddy-ai`）保持「仅支持 Windows」的明确阻断。
 
 ---
 

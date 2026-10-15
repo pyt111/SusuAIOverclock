@@ -25,7 +25,8 @@
 | `dsh` | ✅ 移植安装器 | `macos/installers/dsh/install-macos.mjs`（PowerShell 安装器的 Node 等价实现） |
 | `opencode` | ✅ 移植安装器 | `macos/installers/opencode/install-macos.mjs`（配置合并 + 对 mac 版 asar 打补丁） |
 | `workbuddy` / `workbuddy-ai` | ❌ 仅 Windows | 安装器为 `ps1` / `cmd`，且载荷内含 Windows 专属组件 |
-| `codex` / `codex-panghu` / `anti-gravity`（已隔离） | ❌ 仅 Windows | 同上；隔离策略与知情同意逻辑在 macOS 上照常生效 |
+| `codex`（已隔离） | ✅ 移植安装器 | `macos/installers/codex/install-macos.mjs`（`install-replica.ps1` 的 Node 等价实现）；**仍需勾选知情同意**才解锁 |
+| `codex-panghu` / `anti-gravity`（已隔离） | ❌ 仅 Windows | 安装器与载荷均为 Windows 专属；隔离策略与知情同意逻辑在 macOS 上照常生效 |
 
 在非 Windows 平台上，仍属 Windows 专属的包会在包卡片上显示「仅支持 Windows」并禁用安装 / 卸载按钮。
 
@@ -83,7 +84,7 @@ open "/Applications/苏苏 AI超频.app"
 | --- | --- |
 | `electron/core.cjs` | `buildSpawn()` 平台守卫（`ps1`/`cmd` 仅 Windows，抛可读原因）；`resolvePythonBin()` 非 Windows 探测 `python3`；`resolveNodeBin()`（系统 `node` → Electron 自带 Node）；`findOnPath()`；`WINDOWS_ONLY_PACKS` / `MAC_APP_BUNDLES` / `MAC_DEPLOY_PLANS` / `macInstallerPresent()` / `packPlatformBlockReason(id, packPath)`；`deployPlanFor(id, packPath)` 优先 mac 计划；`detectPlatform()` 增加 `/Applications/*.app` 证据（只写入 `macApp`，不写 `exePath`） |
 | `electron/main.cjs` | 包卡片 / 导入分析在非 Windows 上显示平台阻断原因（传入 packPath 判定）；spawn `ENOENT` 兜底为可读错误；子进程环境合并 `sp.env`（mac 安装器解释器需要） |
-| `macos/installers/<包>/install-macos.mjs` | mac 移植安装器（dsh / opencode），含 `--uninstall` / `--dry-run` / `--pack` / 独立测试目录支持 |
+| `macos/installers/<包>/install-macos.mjs` | mac 移植安装器（dsh / opencode / codex），含 `--uninstall` / `--dry-run` / `--pack` / 独立测试目录支持 |
 | `macos/build-macos.sh` | 组装 + 注入 mac 安装器 + LSEnvironment + ad-hoc 签名；退出清理临时目录 |
 | `tests/core.test.cjs` | 平台阻断 / mac 计划选择 / `buildSpawn` 守卫 / `resolvePythonBin` 回归测试（按平台自动跳过） |
 | `package.json` | `npm run build:mac` 入口 |

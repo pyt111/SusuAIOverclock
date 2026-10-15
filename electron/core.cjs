@@ -1275,9 +1275,9 @@ function isConsentPack(id) {
 /**
  * 官方安装器为 Windows 专属（PowerShell / CMD）且没有 mac 移植安装器的包。
  * 它们在 macOS / Linux 上无法部署：buildSpawn 会阻断，包卡片显示 blockedReason。
- * cursor / claude 是纯 Python 安装器，跨平台可用；dsh / opencode 走 MAC_DEPLOY_PLANS（macos 分支）。
+ * cursor / claude 是纯 Python 安装器，跨平台可用；dsh / opencode / codex 走 MAC_DEPLOY_PLANS（macos 分支）。
  */
-const WINDOWS_ONLY_PACKS = new Set(['codex', 'codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']);
+const WINDOWS_ONLY_PACKS = new Set(['codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']);
 
 /** macOS 客户端 App 包名（仅用于"已安装"证据与安装目录展示，不参与 CLI 启动）。 */
 const MAC_APP_BUNDLES = {
@@ -1308,6 +1308,12 @@ const MAC_DEPLOY_PLANS = {
     install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.'] },
     uninstall: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--uninstall'] },
     backupDirs: [opencodeConfigHome()]
+  },
+  codex: {
+    // 隔离包：仍需知情同意（assertPackAllowed）后才可部署；参数对齐 Windows 官方计划 -NoOpenLinks -SkipAstra6
+    install: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--no-open-links', '--skip-astra6'] },
+    uninstall: { file: MAC_INSTALLER_FILE, kind: 'node', args: ['--pack', '.', '--uninstall'] },
+    backupDirs: [codexHome()]
   }
 };
 for (const id of Object.keys(MAC_DEPLOY_PLANS)) Object.freeze(MAC_DEPLOY_PLANS[id].backupDirs);
@@ -1344,7 +1350,7 @@ function packPlatformBlockReason(id, packPath) {
     return `该包在 ${osName} 上需要 mac 移植安装器 ${MAC_INSTALLER_FILE}，当前包目录里没有它；请用 mac 分支重新组装（见 macos/README.md）。`;
   }
   if (!WINDOWS_ONLY_PACKS.has(id)) return null;
-  return `该包安装器为 PowerShell / CMD 脚本，仅支持 Windows；当前系统是 ${osName}。可用的包：cursor、claude、dsh、opencode（详见 macos/README.md）。`;
+  return `该包安装器为 PowerShell / CMD 脚本，仅支持 Windows；当前系统是 ${osName}。可用的包：cursor、claude、dsh、opencode、codex（详见 macos/README.md）。`;
 }
 
 function detectPlatform(id) {
@@ -1760,7 +1766,21 @@ function buildCliVerifyArgs(cwd, prompt = VERIFY_PROMPT) {
 }
 
 function isCliVerifyInfrastructureError(text) {
-  return /not inside a trusted directory|skip-git-repo-check|reading additional input from stdin|failed to read.*stdin|stdin.*not.*trusted/i.test(
+  // 注意：不要把 codex 在非 TTY 下恒会打印的 `Reading additional input from stdin...`
+  // 当作触发词——那行是提示而非错误，一旦混入判定，真实的上游 503 / 网络故障
+  // 会被误报成「启动参数拦截」，把归因指向错误的方向。
+  return /not inside a trusted directory|skip-git-repo-check|failed to read.*stdin|stdin.*not.*trusted/i.test(
+    String(text || '')
+  );
+}
+
+/**
+ * 上游/网络层故障判定（与「参数拦截」「模型拒绝」区分开）。
+ * codex 这类 CLI 在服务端不可用时表现为 rc≠0 + 一串 Reconnecting + HTTP 状态码，
+ * 与破甲包本身无关；单独归类后界面上能给出「换时间重试」而不是「检查安装效果」。
+ */
+function isCliUpstreamError(text) {
+  return /Reconnecting\.\.\.|unexpected status (?:429|500|502|503|504)|Service (?:Unavailable|temporarily unavailable)|ECONNREFUSED|ETIMEDOUT|ENOTFOUND|socket hang up|network error|fetch failed/i.test(
     String(text || '')
   );
 }
@@ -2125,6 +2145,21 @@ function findCodexCliInfo() {
     if (!dir) continue;
     push(path.join(dir, 'codex.exe'), 'PATH');
     push(path.join(dir, 'codex.cmd'), 'PATH');
+    // macOS / Linux：codex CLI 是无扩展名的 node 垫片（npm -g 或官方安装脚本）
+    if (process.platform !== 'win32') push(path.join(dir, 'codex'), 'PATH');
+  }
+
+  // 5b) 非 Windows 常见位（mac 分支）：npm 全局 bin、Homebrew、官方安装器落点
+  if (process.platform !== 'win32') {
+    for (const p of [
+      path.join(HOME, '.codex', 'bin', 'codex'),
+      '/usr/local/bin/codex',
+      '/opt/homebrew/bin/codex',
+      path.join(HOME, '.npm-global', 'bin', 'codex'),
+      path.join(HOME, '.local', 'bin', 'codex')
+    ]) {
+      push(p, p.startsWith(HOME) ? p.replace(HOME, '~') : p);
+    }
   }
 
   // 6) 全盘常见位兜底
@@ -3411,6 +3446,7 @@ module.exports = {
   VERIFY_PROMPT,
   buildCliVerifyArgs,
   isCliVerifyInfrastructureError,
+  isCliUpstreamError,
   CONFIG_CHECKS,
   analyzeReply,
   findCodexCli,

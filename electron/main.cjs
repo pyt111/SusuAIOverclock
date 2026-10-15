@@ -401,6 +401,21 @@ async function runDeepVerify(id) {
       timeout: 120000
     });
     const raw = `${r.stdout}\n${r.stderr}`.trim();
+    // 上游/网络故障先判：它跟参数、安装都无关，报「503 重试」而不是「去查安装」
+    if (r.code !== 0 && core.isCliUpstreamError(raw)) {
+      const detail = raw.slice(0, 400);
+      layers.push({
+        layer: 'L4',
+        name: '会话层',
+        ok: false,
+        label: '上游服务不可用（非安装问题，换时间重试）',
+        detail
+      });
+      result.failAt = 'L4';
+      result.reply = detail;
+      result.layers = layers;
+      return result;
+    }
     if (r.code !== 0 && core.isCliVerifyInfrastructureError(raw)) {
       const detail = raw.slice(0, 400);
       layers.push({

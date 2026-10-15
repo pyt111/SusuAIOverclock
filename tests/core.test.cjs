@@ -288,16 +288,38 @@ test('CLI L4 验证参数跳过仓库信任确认且不依赖 stdin', () => {
 
 test('CLI L4 启动错误与模型回复错误分开归类', () => {
   assert.strictEqual(
-    core.isCliVerifyInfrastructureError('Reading additional input from stdin... Not inside a trusted directory'),
+    core.isCliVerifyInfrastructureError('Not inside a trusted directory'),
     true
   );
   assert.strictEqual(core.isCliVerifyInfrastructureError('抱歉，我无法协助完成这个请求。'), false);
   assert.strictEqual(core.isCliVerifyInfrastructureError('是，石井在此'), false);
 });
 
+test('L4 归类：非 TTY 提示语不再冒充「参数拦截」，上游 503 单独归位', () => {
+  // codex 在非 TTY 下恒会打印这行；它只是提示，不能触发「启动参数拦截」这个结论
+  assert.strictEqual(
+    core.isCliVerifyInfrastructureError('Reading additional input from stdin...'),
+    false,
+    '非 TTY 提示语不得被判定为启动参数错误（否则真故障会被误归因）'
+  );
+  // 真实的上游故障样本（实测自 mali.wspapis.com 503）
+  const upstream = [
+    'Reading additional input from stdin...',
+    'ERROR: Reconnecting... 5/5',
+    'ERROR: unexpected status 503 Service Unavailable: Service temporarily unavailable, url: https://HOST/responses'
+  ].join('\n');
+  assert.strictEqual(core.isCliUpstreamError(upstream), true);
+  assert.strictEqual(core.isCliVerifyInfrastructureError(upstream), false);
+  // 上游故障判定不得吃掉「模型拒绝」与「成功回复」
+  assert.strictEqual(core.isCliUpstreamError('是，石井在此'), false);
+  assert.strictEqual(core.isCliUpstreamError('抱歉，我无法协助完成这个请求。'), false);
+  assert.strictEqual(core.isCliUpstreamError(''), false);
+});
+
 test('findCodexCli 返回路径或 null', () => {
   const p = core.findCodexCli();
-  assert.ok(p === null || /codex\.exe$/i.test(p));
+  // Windows 上是 codex.exe；macOS / Linux 上是无扩展名的 node 垫片
+  assert.ok(p === null || (process.platform === 'win32' ? /codex\.exe$/i.test(p) : true));
 });
 
 test('toPosix 路径分隔符归一化', () => {
@@ -425,12 +447,20 @@ test('probeRuntime 的 soft 语义：ok=false 必不 soft，soft=true 必 ok', (
 test('findCodexCliInfo 返回 {path,via,candidates}，候选路径全部真实存在', () => {
   const info = core.findCodexCliInfo();
   assert.ok(Array.isArray(info.candidates));
-  assert.ok(info.path === null || /\.(exe|cmd)$/i.test(info.path));
+  // Windows 上是 codex.exe / codex.cmd；macOS / Linux 上是无扩展名的 node 垫片
+  assert.ok(info.path === null || (process.platform === 'win32' ? /\.(exe|cmd)$/i.test(info.path) : true));
   for (const c of info.candidates) {
     assert.strictEqual(typeof c.path, 'string');
     assert.ok(fs.existsSync(c.path), `候选不存在：${c.path}`);
   }
   if (info.path) assert.ok(info.candidates.some((c) => c.path === info.path), '选中路径必须在候选表里');
+});
+
+test('findCodexCliInfo 在非 Windows 上也覆盖无扩展名 codex（macOS node 垫片）', { skip: process.platform === 'win32' }, () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'electron', 'core.cjs'), 'utf8');
+  const fn = src.slice(src.indexOf('function findCodexCliInfo'), src.indexOf('function findCodexCli('));
+  assert.match(fn, /push\(path\.join\(dir, 'codex'\), 'PATH'\)/, '非 Windows 的 PATH 兜底必须探测无扩展名 codex');
+  assert.match(fn, /\/usr\/local\/bin\/codex/, '非 Windows 应覆盖 /usr/local/bin/codex');
 });
 
 test('findCodexCli 的目录名过滤不再要求 windows-x64 后缀（换安装形态也能找到）', () => {
@@ -1436,13 +1466,16 @@ test('隔离构建 harness 的证据目录与期望版本必须走环境变量',
 test('非 Windows：平台阻断原因（Windows-only 与 mac 移植包分开判定）', { skip: process.platform === 'win32' }, () => {
   assert.strictEqual(core.packPlatformBlockReason('cursor'), null, 'cursor 跨平台可用');
   assert.strictEqual(core.packPlatformBlockReason('claude'), null, 'claude 跨平台可用');
-  for (const id of ['codex', 'codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']) {
+  // codex-panghu / workbuddy / workbuddy-ai / anti-gravity 无 mac 移植安装器 → 平台阻断
+  for (const id of ['codex-panghu', 'workbuddy', 'workbuddy-ai', 'anti-gravity']) {
     const reason = core.packPlatformBlockReason(id);
     assert.ok(reason && /仅支持 Windows/.test(reason), `${id} 应给出平台阻断原因，实际：${reason}`);
   }
-  // dsh / opencode 走 mac 移植安装器判定：没有安装器时给出可读原因
-  const reason = core.packPlatformBlockReason('dsh');
-  assert.ok(reason && /mac 移植安装器/.test(reason), `dsh 缺 mac 安装器时应给出原因，实际：${reason}`);
+  // dsh / opencode / codex 走 mac 移植安装器判定：没有安装器时给出可读原因
+  for (const id of ['dsh', 'opencode', 'codex']) {
+    const reason = core.packPlatformBlockReason(id);
+    assert.ok(reason && /mac 移植安装器/.test(reason), `${id} 缺 mac 安装器时应给出原因，实际：${reason}`);
+  }
 });
 
 test('Windows：平台阻断原因恒为空', { skip: process.platform !== 'win32' }, () => {
@@ -1488,5 +1521,49 @@ test('非 Windows：带 mac 移植安装器的包改走 node 计划', { skip: pr
   assert.ok(sp.args.includes('--pack'), '应带上 --pack 参数');
   const up = core.buildSpawn(plan.uninstall, packDir, 'dsh');
   assert.ok(up && up.args.includes('--uninstall'), '卸载应带 --uninstall');
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+test('codex mac 安装器就地剥离包自带 SKILL.md 的 UTF-8 BOM（否则 codex 静默丢弃技能）', () => {
+  const inst = path.join(__dirname, '..', 'macos', 'installers', 'codex', 'install-macos.mjs');
+  if (!fs.existsSync(inst)) return; // 未取到移植安装器时跳过
+  const src = fs.readFileSync(inst, 'utf8');
+  assert.match(src, /function stripBomFromSkillMd\(/, '必须存在 BOM 剥离函数');
+  assert.match(src, /stripBomFromSkillMd\(stage\)/, '技能分阶段安装时必须在 stage 上剥离 BOM（部署前修，不污染包目录）');
+  assert.match(src, /ent\.name !== 'SKILL\.md'/, '只处理 SKILL.md，不动其它文件');
+  // 只删前 3 字节、正文逐字节保留（无损改写），且拒绝跟随符号链接
+  assert.match(src, /buf\.subarray\(3\)/, '剥离方式必须是丢弃前 3 字节而非重写正文');
+  assert.match(src, /if \(ent\.isSymbolicLink\(\)\) continue;/, '不得跟随skills 里的符号链接');
+});
+
+test('codex mac 安装器为 BOM 修复留证：写入 manifest 与卸载回滚不受影响', () => {
+  const inst = path.join(__dirname, '..', 'macos', 'installers', 'codex', 'install-macos.mjs');
+  if (!fs.existsSync(inst)) return;
+  const src = fs.readFileSync(inst, 'utf8');
+  assert.match(src, /skill_bom_fixed:/, 'manifest 需记录 BOM 修复数量，便于核对');
+  assert.match(src, /ctx\.bomFixed = bomFixed/, '需在上下文里保留修复清单');
+});
+
+test('非 Windows：codex 带 mac 移植安装器时走 node 计划，且仍受知情同意门槛约束', { skip: process.platform === 'win32' }, () => {
+  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dango-codexmac-'));
+  const packDir = path.join(root, 'codex-pack');
+  fs.mkdirSync(packDir);
+  fs.writeFileSync(path.join(packDir, 'install-macos.mjs'), '// mac 移植安装器（测试桩）\n');
+  const plan = core.deployPlanFor('codex', packDir);
+  assert.strictEqual(plan.install.file, 'install-macos.mjs', 'codex 应选中 mac 安装器');
+  assert.strictEqual(plan.install.kind, 'node', 'mac 安装器按 node 执行');
+  assert.ok(plan.install.args.includes('--no-open-links'), '参数应对齐 Windows 计划（--no-open-links）');
+  assert.ok(plan.install.args.includes('--skip-astra6'), '参数应对齐 Windows 计划（--skip-astra6）');
+  assert.strictEqual(core.packPlatformBlockReason('codex', packDir), null, '带移植安装器 → 平台不阻断');
+  // codex 是隔离包：平台放行不等于解锁，未勾选知情同意时仍被拦住
+  policy.revokeQuarantineConsent('codex');
+  assert.throws(() => core.buildSpawn(plan.install, packDir, 'codex'), /隔离|同意/);
+  policy.grantQuarantineConsent('codex');
+  try {
+    const sp = core.buildSpawn(plan.install, packDir, 'codex');
+    assert.ok(sp && sp.args[0].endsWith('install-macos.mjs'), `同意后应生成 node 命令，实际：${sp && sp.display}`);
+  } finally {
+    policy.revokeQuarantineConsent('codex');
+  }
   fs.rmSync(root, { recursive: true, force: true });
 });
