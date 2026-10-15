@@ -335,8 +335,10 @@ button:disabled {
 
 .nav-item.active .dot {
   opacity: 1;
-  box-shadow: 0 0 0 4px rgba(110, 180, 238, 0.22), 0 0 10px rgba(110, 180, 238, 0.7);
+  /* 阴影静态化：原本由 pulse-dot 动画驱动，现改为固定值 + transform 脉冲（见文件末尾说明）*/
+  box-shadow: 0 0 0 5px rgba(110, 180, 238, 0.18), 0 0 12px rgba(110, 180, 238, 0.75);
   animation: pulse-dot 2.4s ease-in-out infinite;
+  will-change: transform;
 }
 
 .sidebar-foot {
@@ -357,11 +359,12 @@ button:disabled {
   padding: 24px 28px;
   border-radius: var(--r-lg);
   background: linear-gradient(120deg, #ffffff 0%, var(--sakura-soft) 52%, var(--soda-soft) 100%);
-  box-shadow: var(--shadow-md), 0 0 0 1px rgba(126, 196, 240, 0.55), 0 0 22px rgba(110, 180, 238, 0.16);
+  /* 原为 animation: hero-glow（动画 box-shadow，每帧重绘模糊）。
+     阴影改为静态固定值，视觉几乎无差别，但省掉一整个无限动画。 */
+  box-shadow: var(--shadow-md), 0 0 0 2px rgba(78, 163, 228, 0.55), 0 0 24px rgba(110, 180, 238, 0.2);
   margin-bottom: 22px;
   position: relative;
   overflow: hidden;
-  animation: hero-glow 4.2s ease-in-out infinite;
 }
 
 .hero::before {
@@ -551,7 +554,10 @@ button:disabled {
   background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.7), rgba(142, 200, 244, 0.48), transparent);
   transform: skewX(-18deg);
   pointer-events: none;
+  /* 性能：原动画动的是 left（每帧触发布局/重排）。改为 translateX，
+     位移交给合成层，不再重排。 */
   animation: card-sheen-idle 4.4s ease-in-out infinite;
+  will-change: transform, opacity;
 }
 
 .pack-card:nth-child(2)::after { animation-delay: 1.1s; }
@@ -624,8 +630,10 @@ button:disabled {
 .badge-ok {
   background: var(--matcha-soft);
   color: var(--matcha-deep);
-  box-shadow: 0 0 0 1px rgba(110, 180, 238, 0.16);
+  /* 阴影静态化 + transform 脉冲（原 pulse-soft 动画 box-shadow，每帧重绘）*/
+  box-shadow: 0 0 0 1px rgba(110, 180, 238, 0.26), 0 0 8px rgba(143, 200, 244, 0.35);
   animation: pulse-soft 2.8s ease-in-out infinite;
+  will-change: transform;
 }
 
 .badge-warn {
@@ -1200,6 +1208,17 @@ button:disabled {
   }
 }
 
+/* ── 性能：窗口失焦 / 不可见时暂停全部动画 ────────────────────────────
+   实测（macOS Intel 核显）：30+ 个无限装饰动画在窗口可见时让 GPU 进程
+   持续占 ~100–140% CPU；暂停后回落到 ~0%。用户切到别的窗口后这些动画
+   本就没有观看价值，故统一暂停（用 paused 而非 none，回来时不跳帧）。
+   由 App.tsx 监听 focus/blur/visibilitychange 切换 html.anim-paused。 */
+html.anim-paused *,
+html.anim-paused *::before,
+html.anim-paused *::after {
+  animation-play-state: paused !important;
+}
+
 .app.reduced-motion .cat-wave,
 .app.reduced-motion .fx-orb,
 .app.reduced-motion .fx-beam,
@@ -1581,12 +1600,17 @@ button:disabled {
 }
 
 .susu-halo {
+  /* 阴影静态化：原本由 susu-halo-pulse 每帧动画 box-shadow */
+  box-shadow: 0 0 14px rgba(126, 190, 240, 0.55);
   animation: susu-halo-pulse 3s ease-in-out infinite alternate;
+  will-change: transform, opacity;
 }
 
 @keyframes susu-halo-pulse {
-  0% { transform: scale(1.02); opacity: 0.75; box-shadow: 0 0 10px rgba(110, 180, 238, 0.4); }
-  100% { transform: scale(1.09); opacity: 1; box-shadow: 0 0 18px rgba(142, 200, 244, 0.7); }
+  /* 原实现同时动 box-shadow（每帧重绘）；现只保留 transform + opacity，
+     光晕本体由 .susu-halo 的静态阴影提供。 */
+  0% { transform: scale(1.02); opacity: 0.78; }
+  100% { transform: scale(1.09); opacity: 1; }
 }
 
 .susu-badge-sparkle {
@@ -2539,6 +2563,10 @@ button:disabled {
   pointer-events: none;
   z-index: 0;
   overflow: hidden;
+  /* 性能：把这一层装饰性背景隔离成独立渲染容器。内部 8 个持续动画
+     （3 个 orb 漂移 + beam 扫动 + 6 个 spark 闪烁）因此不再触发主内容区重绘。 */
+  contain: strict;
+  will-change: transform;
 }
 
 .fx-orb {
@@ -2585,9 +2613,14 @@ button:disabled {
   height: 110px;
   background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.5) 36%, rgba(126, 196, 240, 0.55) 50%, rgba(255, 255, 255, 0.36) 64%, transparent 100%);
   transform: rotate(-8deg);
-  filter: blur(8px);
+  /* 性能：原为 filter: blur(8px)。该元素 140% 宽 × 110px，模糊半径 8px
+     意味着每帧都要重算上千像素的高斯模糊，是本应用 GPU 进程的主要负载之一。
+     用一层额外的柔边渐变替代模糊，观感接近但零模糊开销。 */
+  -webkit-mask-image: linear-gradient(180deg, transparent 0%, #000 26%, #000 74%, transparent 100%);
+  mask-image: linear-gradient(180deg, transparent 0%, #000 26%, #000 74%, transparent 100%);
   animation: beam-sweep 6.4s ease-in-out infinite;
   opacity: 0.78;
+  will-change: transform, opacity;
 }
 
 .fx-spark {
@@ -2619,10 +2652,12 @@ button:disabled {
 }
 
 @keyframes card-sheen-idle {
-  0%, 42% { left: -45%; opacity: 0; }
+  /* 原实现动 left（-45% → 112%），每帧触发布局。改为 translateX：
+     元素宽 46% 容器，位移 157% 容器 = 341.3% 自身宽。合成层内完成。 */
+  0%, 42% { transform: skewX(-18deg) translateX(0); opacity: 0; }
   52% { opacity: 1; }
-  78% { left: 112%; opacity: 0.95; }
-  100% { left: 112%; opacity: 0; }
+  78% { transform: skewX(-18deg) translateX(341%); opacity: 0.95; }
+  100% { transform: skewX(-18deg) translateX(341%); opacity: 0; }
 }
 
 @keyframes border-flow {
@@ -2631,13 +2666,16 @@ button:disabled {
 }
 
 @keyframes hero-glow {
-  0%, 100% { box-shadow: var(--shadow-md), 0 0 0 1px rgba(126, 196, 240, 0.42), 0 0 16px rgba(110, 180, 238, 0.12); }
-  50% { box-shadow: var(--shadow-md), 0 0 0 2px rgba(78, 163, 228, 0.8), 0 0 28px rgba(110, 180, 238, 0.28); }
+  /* 原实现动画 box-shadow（每帧重新栅格化模糊）。改为只动 opacity：
+     阴影本体静态留在 .hero 上，呼吸感由透明度叠加实现。 */
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.94; }
 }
 
 @keyframes card-sheen {
-  0% { left: -45%; opacity: 1; }
-  100% { left: 112%; opacity: 0; }
+  /* 同 card-sheen-idle：left → translateX，避免 hover 时每帧触发布局 */
+  0% { transform: skewX(-18deg) translateX(0); opacity: 1; }
+  100% { transform: skewX(-18deg) translateX(341%); opacity: 0; }
 }
 
 @keyframes orb-breathe {
@@ -2675,12 +2713,17 @@ button:disabled {
   42% { opacity: 1; transform: scale(1.35) rotate(18deg); }
 }
 
+/* ── 性能：以下两组原本动画 box-shadow ──────────────────────────────
+   box-shadow 每帧都要重新栅格化模糊，无法交给合成层，实测是本应用
+   GPU 进程满载的首要来源（macOS 上 GPU 进程持续 ~140% CPU）。
+   改为「阴影静态 + 只动 transform/opacity」：视觉上仍是呼吸/脉冲感，
+   但全部落在合成器可缓存的属性上，不再触发每帧重绘。 */
 @keyframes pulse-dot {
-  0%, 100% { box-shadow: 0 0 0 4px rgba(110, 180, 238, 0.18), 0 0 8px rgba(110, 180, 238, 0.55); }
-  50% { box-shadow: 0 0 0 7px rgba(110, 180, 238, 0.1), 0 0 16px rgba(110, 180, 238, 0.9); }
+  0%, 100% { transform: scale(1); opacity: 0.72; }
+  50% { transform: scale(1.22); opacity: 1; }
 }
 
 @keyframes pulse-soft {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(110, 180, 238, 0.16); }
-  50% { box-shadow: 0 0 0 1px rgba(110, 180, 238, 0.34), 0 0 12px rgba(143, 200, 244, 0.5); }
+  0%, 100% { transform: scale(1); opacity: 0.72; }
+  50% { transform: scale(1.06); opacity: 1; }
 }

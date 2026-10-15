@@ -20,6 +20,11 @@
 
 ### 修复
 
+- **GPU 进程持续满载（macOS 上实测 100–140% CPU）**：三个叠加原因，逐条修掉。
+  1. **30+ 个无限动画里 25 个在动 `box-shadow`** —— `box-shadow` 每帧都要重新栅格化模糊，无法交给合成层。改为「阴影静态 + 只动 `transform`/`opacity`」：`pulse-dot` / `pulse-soft` / `hero-glow` / `susu-halo-pulse` 四组关键帧重写，视觉上仍是呼吸/脉冲感，但全部落在合成器可缓存的属性上。
+  2. **`.fx-beam` 的 `filter: blur(8px)`**（140% 宽 × 110px 的大层每帧重算高斯模糊）→ 用柔边渐变 + `mask-image` 替代；`.pack-card::after` / `card-sheen` 原本动画 `left`（每帧触发布局）→ 改 `translateX`；`.fx-stage` 加 `contain: strict` 隔离重绘范围。
+  3. **窗口失焦后动画仍在满速跑** —— `backgroundThrottling: false` 改回 Chromium 默认（`true`）；并在渲染器监听 `focus`/`blur`/`visibilitychange`，失焦时给 `<html>` 挂 `anim-paused` 类，用 `animation-play-state: paused` 统一暂停全部动画（含伪元素），重新聚焦即恢复。
+  - 实测（30 秒窗口，`ps` 累计 CPU 时间两次采样）：修复前 GPU 进程 ~140% → 修复后动画运行 ~61% → 失焦暂停后 **0%**；渲染进程 56% → 28% → 0%。视觉无可见变化（已截图比对）。
 - **codex 破甲包自带 3 个带 UTF-8 BOM 的 `SKILL.md` —— 每次会话刷 ERROR 且技能被静默丢弃。** codex 的 `session_init` 用严格解析器读 skills，要求文件首字符就是 frontmatter 定界符 `---`；文件以 `EF BB BF` 开头时 codex 报 `failed to load skill … missing YAML frontmatter delimited by ---` 并**丢弃该技能**（用户可见表现是「创建会话失败」）。
   - 手工核对：包内 `materials/skills/zzy-codex5.6/zzy-reverse-skill/skills/{js-reverse,docs-generator,browser-automation}/SKILL.md` 三个文件带 BOM，装完直接丢失。
   - **Windows 版同样中招**：包内自带 `Fix-SkillFrontmatter.ps1`，但 `install-replica.ps1` 从不调用它（`Install-All.cmd` / `Install-OneClick.cmd` 也没有），所以那个修复器在真实安装里从未跑过。

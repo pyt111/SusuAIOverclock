@@ -1557,7 +1557,11 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
-      backgroundThrottling: false
+      // 性能：此处曾设 backgroundThrottling:false，导致窗口最小化/被遮挡后
+      // 渲染器仍以全速出帧（macOS 上实测 GPU 进程持续 ~140% CPU，最小化也不降）。
+      // 恢复 Chromium 默认节流：窗口不可见时停止出帧。
+      // 部署进度由主进程推进，渲染器只负责显示，恢复可见后照常更新，不受影响。
+      backgroundThrottling: true
     }
   });
   trace('BrowserWindow 构造完成');

@@ -62,6 +62,36 @@ export default function App() {
     }
   }, []);
 
+  /**
+   * 窗口失焦 / 不可见时暂停全部装饰动画（性能修复）。
+   *
+   * 为什么：本应用有 30+ 个无限循环的装饰动画（光效、扫光、脉冲）。实测在
+   * macOS（Intel 核显）上，只要窗口可见且动画在跑，GPU 进程就持续占用
+   * ~100–140% CPU；而一旦把这些动画暂停，GPU 进程立刻回落到 ~0%。
+   * 也就是说，用户切到别的窗口之后，这些动画仍在满速重绘、白白烧电。
+   *
+   * 做法：给 <html> 挂 `anim-paused` 类，用 CSS 把 animation-play-state 设为
+   * paused（而不是 animation:none，避免回来时动画跳帧）。窗口重新聚焦即恢复。
+   * 进度条 / 部署状态由 React 状态驱动，不受影响；只是装饰动画停摆。
+   */
+  useEffect(() => {
+    const root = document.documentElement;
+    const sync = () => {
+      const idle = document.hidden || !document.hasFocus();
+      root.classList.toggle('anim-paused', idle);
+    };
+    sync();
+    window.addEventListener('focus', sync);
+    window.addEventListener('blur', sync);
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      window.removeEventListener('focus', sync);
+      window.removeEventListener('blur', sync);
+      document.removeEventListener('visibilitychange', sync);
+      root.classList.remove('anim-paused');
+    };
+  }, []);
+
   const toggleReduced = (v: boolean) => {
     setReducedMotion(v);
     try {
