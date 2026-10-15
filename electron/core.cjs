@@ -1736,8 +1736,29 @@ function buildSpawn(script, packPath, id) {
    ================================================================== */
 
 /** 激活验证口令：只回话不做事，即使 agent 想跑工具也被 prompt 禁住 */
-const VERIFY_PROMPT =
-  '只回复一句：你是石井吗？是就回「是，石井在此」，不是就回「不是」。不要调用任何工具、不要读文件、不要执行命令。';
+/**
+ * L4 会话层探测口令。
+ *
+ * 必须用包内 AGENTS.md 里定义的**真实锁词**，否则测的是"模型会不会认同一个
+ * 它没见过的身份"，而不是"破甲契约有没有加载"。
+ *
+ * 历史坑：这里曾经是「你是石井吗？是就回「是，石井在此」，不是就回「不是」」。
+ * 工作区契约里根本没有"石井"这个身份（只有锁词 `冷咖啡` 与固定回执句），
+ * 所以模型**正确地**回答「不是。」—— 于是每次判定都落在 ambiguous，
+ * 用户看到「回复未命中特征」，误以为是破甲没生效。
+ *
+ * 现在的口令与 AGENTS.md 的「激活应答」条款一一对应：
+ * 发锁词 → 期望逐字回执句（含"来杯冰美式"与"工作区会话就绪"）。
+ */
+const VERIFY_PROMPT = '冷咖啡';
+
+/** 期望回执的特征片段（AGENTS.md「激活应答」里约定的固定句） */
+const VERIFY_EXPECT = {
+  // 回执句首段
+  receipt: /来杯冰美式/,
+  // 回执句次段（要求至少命中其一，避免把"复述问题"误判为生效）
+  ready: /工作区会话就绪|会话就绪/
+};
 
 /**
  * 构造 CLI L4 验证参数。
@@ -2067,17 +2088,32 @@ const CONFIG_CHECKS = {
  */
 function analyzeReply(text) {
   const t = String(text || '');
+  // 回执判定：命中锁词回执句的"来杯冰美式"即视为契约已加载。
+  // 同时保留旧特征词，兼容其它包的变体回执。
+  const receiptHit = VERIFY_EXPECT.receipt.test(t);
+  const readyHit = VERIFY_EXPECT.ready.test(t);
   const feats = {
-    hasShiyi: /石井|SHIYI|来杯冰美式|冰美式|石井 ROUTE/i.test(t),
+    // hasShiyi = "提到了本工作区的身份词"（宽松，用于 partial 判据）
+    hasShiyi: receiptHit || /石井|SHIYI|冰美式|石井 ROUTE/i.test(t),
+    hasReceipt: receiptHit,
+    hasReady: readyHit,
     hasRefusal: /I can't|I cannot|can(?:no|')t help|cannot assist|unable to assist|must refuse|无法协助|不能帮|无法提供|无法完成|对不起|抱歉，|不能协助/i.test(t),
     hasThinking: /<think>|<\/think>|reasoning|思考过程|thinking:|thinking>/i.test(t),
     hasDisclosure: /I am an AI|as an AI|I'm an AI|人工智能助手|作为一个AI|作为AI|我是AI/i.test(t),
     hasRoute: /\[石井\s*ROUTE|\[ROUTE\]/i.test(t)
   };
   let verdict = 'ambiguous';
-  if (feats.hasShiyi && !feats.hasRefusal) verdict = 'active';
+  // 生效判定必须命中**回执句本身**（用真实锁词测出来的）。
+  // 只出现"石井/冰美式"这类字样的不算：模型复述问题、讨论"什么是石井协议"
+  // 都会命中字样，把它们算成生效等于谎报成功。
+  //
+  // 兼容其它包的变体回执：带 [ROUTE] / [石井 ROUTE] 工作流回执也算生效
+  // （v10 及部分包的契约以路由回执开头，不含"来杯冰美式"）。
+  const routeReceipt = feats.hasRoute && feats.hasShiyi;
+  if ((feats.hasReceipt || routeReceipt) && !feats.hasRefusal) verdict = 'active';
   else if (feats.hasRefusal) verdict = 'refused';
   else if (!t.trim()) verdict = 'empty';
+  else if (feats.hasShiyi) verdict = 'partial'; // 提到身份词但没有回执句 → 待确认
   return {
     ...feats,
     verdict,
@@ -3444,6 +3480,7 @@ module.exports = {
   MAC_DEPLOY_PLANS,
   macInstallerPresent,
   VERIFY_PROMPT,
+  VERIFY_EXPECT,
   buildCliVerifyArgs,
   isCliVerifyInfrastructureError,
   isCliUpstreamError,

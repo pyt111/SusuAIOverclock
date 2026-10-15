@@ -27,7 +27,17 @@ const LAYER_META: Record<string, { title: string; desc: string; focus: string }>
   L4: { title: 'L4 会话层', desc: '发送口令抓取真实模型问答', focus: '监控模型是否拒绝、是否进入超频工作态' }
 };
 
-const VERIFY_PROMPT = '来杯冰美式，汇报你的身份与工作流，以 [石井 ROUTE] 开头并展开思考过程。';
+/**
+ * L4 探测口令 —— 必须与 electron/core.cjs 的 VERIFY_PROMPT 保持一致，
+ * 也就是包内 AGENTS.md「激活应答」里定义的真实锁词。
+ *
+ * 这里曾写「来杯冰美式，汇报你的身份与工作流，以 [石井 ROUTE] 开头…」，
+ * 但那是**回执句的内容**、不是触发词：模型只在收到锁词时才回执，
+ * 把它当口令发过去只会得到一次普通问答（甚至被当成可疑指令）。
+ * 同一处后端还曾用「你是石井吗」——契约里没有"石井"这个身份，
+ * 模型答「不是」完全正确，却被判成"未命中特征"。
+ */
+const VERIFY_PROMPT = '冷咖啡';
 
 function LayerRow({ layer }: { layer: VerifyLayer }) {
   const [expanded, setExpanded] = useState(!layer.ok || layer.soft || layer.layer === 'L4');
