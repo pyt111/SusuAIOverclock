@@ -106,6 +106,8 @@ node install-macos.mjs --pack . --uninstall                       # 卸载
 | 12 | **`--force`** | 提示「先退出 Codex」并可强推 | 同，但**永不 kill / 重启**任何 codex 进程 | 主动作恶面更大，交给用户自行重启 |
 | 13 | **dry-run** | 无 | **新增** `--dry-run`，零写入 | 便于 CI / 打包前自检；也是本仓库要求 |
 | 14 | **`SKILL.md` 的 UTF-8 BOM** | 不处理（`install-replica.ps1` 从不调用包自带的 `Fix-SkillFrontmatter.ps1`） | 技能部署前就地剥离（只删前 3 字节，原子替换，不跟随符号链接） | 包自带 3 个带 BOM 的 `SKILL.md`；codex 严格要求首字符是 `---`，否则报 `missing YAML frontmatter` 并**静默丢弃该技能** |
+| 15 | **卸载语义** | 只「按最近备份回滚」，且不删自建项 | **恢复到「最初装前态」**：删自建项 + 还原装前文件 + 回收空目录 | 旧语义有三个致命后果（见下「卸载彻底性」） |
+| 16 | **备份纯净性** | 重复安装会把已注入内容当原始态备份 | 备份前先剥离本 Kit 托管块，确保备份是**真装前态** | 否则卸载照脏备份回滚 = 把注入复制回来 |
 
 > 说明：第 1 条与第 14 条是**唯二**会改变落盘字节的差异（第 14 条是修 bug，改完的技能才能被 codex 加载）；
 > 其余为平台面替换或路径修正，合并算法、标记块清单、
@@ -193,6 +195,72 @@ bash selftest.sh --pack "/path/to/packs/codex"
 - 夹具覆盖：用户内容 + Legacy 旧块 + `SHIYI-V11` 外部块 + 旧 ishii 钩子 + 第三方钩子 +
   冲突技能目录 + **符号链接技能** + **`backups/` 无关内容**
 - 全程只写 `/private/tmp/codex-selftest`，不 kill 进程、不打开链接、不碰真实 `~/.codex`
+
+## 卸载彻底性（三个真实缺陷的修复记录）
+
+用户实测反馈：「卸载显示成功，但重启后注入还在」。逐项取证后确认是三个独立缺陷：
+
+### 缺陷 1：卸载只「从备份恢复」，从不删自建项
+
+`restoreItem` 对备份里不存在的项直接 `return`。而**首次安装**时 `hooks/`、`tools/`、
+`prompts/` 在备份里根本不存在（它们是新装的），于是卸载后：
+
+| 项 | 旧行为 | 后果 |
+| --- | --- | --- |
+| `hooks/ishii_auto_route.py` | 保留 | **破甲 hook 脚本（马）永久残留**，codex 重启后照旧加载 |
+| `tools/shiyi_assembler.py` | 保留 | 工具残留 |
+| `prompts/eni-solo-v4.0.0.md` | 有兜底删除 | 正常 |
+| 107 个新装技能 | 保留 | **技能面全部残留**（用户实测残留 91 个 `eni-*`） |
+
+**修法**：卸载改为「恢复到最初装前态」——显式删除本 Kit 自建项（先存进
+`backups/pre-uninstall-<stamp>/` 保险副本），技能按**包内 materials/skills 名单**
+逐个删除装前不存在的目录。
+
+### 缺陷 2：脏备份 —— 卸载把注入原样复制回来
+
+重复安装时，上一轮的托管块还在 `AGENTS.md` 里，本轮却把这份**已注入的 747 行**
+当成"原始状态"备份下来。卸载照它回滚 = 把注入复制回去。实证：
+
+```
+backups/eni-solo-...-083336-242/AGENTS.md   312 行  注入标记 0   ← 第 1 次安装（干净）
+backups/eni-solo-...-090407-341/AGENTS.md   747 行  注入标记 4   ← 第 2 次起全部是脏备份
+backups/eni-solo-...-155135-235/AGENTS.md   747 行  注入标记 4   ← 卸载取的就是这个
+```
+
+**修法**（两侧都改）：
+- **安装侧**：备份前先 `stripManagedBlock()` 剥离托管块，确保备份始终是真装前态
+  （原注入态另存为 `AGENTS.md.injected-prev` 便于排查）；`hooks.json` 同理。
+- **卸载侧**：`findPristineBackup()` 按时间升序找**第一个不含托管块的备份**作为回滚源，
+  而不是无脑取最新那个。它才能带回安装时被有意剥离的 Legacy 旧块。
+
+### 缺陷 3：hooks.json 留空壳
+
+旧版只过滤掉本 Kit 条目，于是留下：
+
+```json
+{ "description": "Codex lifecycle hooks (eni-solo managed hooks)",
+  "hooks": { "UserPromptSubmit": [], "PreCompact": [], "SessionStart": [] } }
+```
+
+**修法**：分两种语义 —— 装前有 `hooks.json` 则整文件还原；装前没有（本 Kit 新建）
+则过滤后若无有效条目直接删文件，保留第三方钩子时只剥本 Kit 条目。
+
+### 验证
+
+`selftest.sh` 新增 16 条断言（用例 B「卸载彻底性」+ 用例 D「连装两次再卸载」），
+当前 **PASS=89 FAIL=0**。真实环境实测（本机 `~/.codex`）：
+
+```
+AGENTS.md     747 行 → 312 行（与装前备份逐字节一致，sha256 ef5c06ac…）
+hooks/        ✅ 删除（ishii_auto_route.py 已移除）
+eni-solo/     ✅ 删除        tools/  ✅ 删除
+prompts/      ✅ 删除        hooks.json  ✅ 删除
+models.json   ✅ 删除（装前不存在）
+slo-runtime/  ✅ 删除
+skills/       113 个 → 6 个（107 个本 Kit 技能清零，用户原有的 computer-use /
+              dev-progress-log / frontend-skill / gsap-plugins 等完整保留）
+config.toml   ✅ 注入块 0 处；用户自己的 model / sandbox_mode / mcp_servers 编辑全部保留
+```
 
 ## 已知限制 / 未验证项
 

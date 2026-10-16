@@ -680,7 +680,19 @@ function runInstall() {
   setStep('[3/9] AGENTS.md');
   step('[3/9] AGENTS.md');
   const agentsPath = path.join(codexHome, 'AGENTS.md');
-  if (exists(agentsPath)) copyFileF(agentsPath, path.join(backup, 'AGENTS.md'));
+  // 备份「装前真原始态」：重复安装时文件里还留着上一轮的托管块，直接照抄会产出
+  // **脏备份**（卸载照它回滚 = 把注入复制回来）。所以先剥离托管块再备份。
+  if (exists(agentsPath)) {
+    const pre = readText(agentsPath);
+    const pristinePre = stripManagedBlock(pre);
+    if (pristinePre !== pre) {
+      copyFileF(agentsPath, path.join(backup, 'AGENTS.md.injected-prev')); // 留档上一轮的注入态，便于排查
+      writeFileUtf8(path.join(backup, 'AGENTS.md'), pristinePre);
+      info('  [i] 检测到上一轮托管块仍在文件中 —— 备份的是剥离后的原始态（避免脏备份）');
+    } else {
+      copyFileF(agentsPath, path.join(backup, 'AGENTS.md'));
+    }
+  }
   const agentsSrc = exists(agentsPath) ? readText(agentsPath) : '';
   const agentsPayload = expandPaths(readText(path.join(mat, 'AGENTS.md')), codexHome, home);
   const agentsRes = mergeMarkedBlock(agentsSrc, agentsPayload, LEGACY_BEGIN_BLOCKS, FOREIGN_KEEP_BLOCKS, AGENTS_TAG);
@@ -702,8 +714,30 @@ function runInstall() {
   const hooksPath = path.join(codexHome, 'hooks.json');
   let existingHooksText = null;
   if (exists(hooksPath)) {
-    copyFileF(hooksPath, path.join(backup, 'hooks.json'));
+    // 与 AGENTS.md 同理：备份「装前真原始态」。若上一轮的托管条目还在，
+    // 备份成已清理的版本，卸载时才能整文件还原干净（否则留下 eni-solo 空壳）。
     existingHooksText = readText(hooksPath);
+    try {
+      const hjPrev = JSON.parse(stripBom(existingHooksText));
+      let dirty = 0;
+      if (hjPrev && hjPrev.hooks && typeof hjPrev.hooks === 'object') {
+        for (const evt of Object.keys(hjPrev.hooks)) {
+          hjPrev.hooks[evt] = arrOf(hjPrev.hooks[evt]).filter((e) => {
+            if (e != null && KIT_ENTRY_RE.test(JSON.stringify(e))) { dirty++; return false; }
+            return true;
+          });
+        }
+      }
+      if (dirty > 0) {
+        copyFileF(hooksPath, path.join(backup, 'hooks.json.injected-prev'));
+        writeFileUtf8(path.join(backup, 'hooks.json'), JSON.stringify(hjPrev, null, 2) + '\n');
+        info(`  [i] 上一轮托管条目仍在 hooks.json（${dirty} 条）—— 备份的是清理后的原始态`);
+      } else {
+        copyFileF(hooksPath, path.join(backup, 'hooks.json'));
+      }
+    } catch {
+      copyFileF(hooksPath, path.join(backup, 'hooks.json'));
+    }
   }
   const matHooks = readJson(path.join(mat, 'hooks.json'));
   const hooksRes = mergeHooksJson(existingHooksText, matHooks, codexHome, home);
@@ -978,6 +1012,64 @@ function findLatestBackup(codexHome) {
   return cands.length ? path.join(root, cands[cands.length - 1]) : null;
 }
 
+/**
+ * 找「最初的装前状态」备份：按时间升序扫描，取**第一个 AGENTS.md 不含托管块的备份**。
+ *
+ * 为什么不能只取最新备份（真实缺陷）：
+ *   · 重复安装时，上一轮的托管块还在文件里 → 最新备份本身已是注入态（脏备份）；
+ *   · 而安装会有意剥离 Legacy 旧块，那个块只存在于**第一次安装前**的备份里。
+ * 所以只有"最老的干净备份"才是真正的用户原始态；找不到才退回最新备份。
+ */
+function findPristineBackup(codexHome) {
+  const root = path.join(codexHome, 'backups');
+  let names = [];
+  try { names = fs.readdirSync(root); } catch { return null; }
+  const cands = names.filter((n) => /^eni-solo-.*-replica-/.test(n))
+    .filter((n) => { const st = safeLstat(path.join(root, n)); return st && st.isDirectory(); })
+    .sort();
+  for (const n of cands) {
+    const p = path.join(root, n);
+    const ap = path.join(p, 'AGENTS.md');
+    if (!exists(ap)) continue;
+    let t = '';
+    try { t = readText(ap); } catch { continue; }
+    if (!backupAgentsLooksDirty(t)) return p;
+  }
+  return cands.length ? path.join(root, cands[cands.length - 1]) : null;
+}
+
+/**
+ * 判断备份里的 AGENTS.md 是「装前真原始态」还是「已被注入的脏备份」。
+ *
+ * 背景（真实缺陷）：重复安装时，上一轮的注入内容还在文件里，于是本轮把
+ * **已注入的 747 行**当成"原始状态"备份下来。卸载若照它回滚，等于把注入态
+ * 原样复制回去 —— 报告写「已回滚」，用户重启后注入依旧在。
+ *
+ * 判据只认**本 Kit 自己的托管块**（`<!-- ENI-SOLO-AGENTS:BEGIN -->`）。
+ * 不能拿 Legacy 块（WORKSPACE-CONTRACT 等）当判据 —— 那些块本来就在用户原文里，
+ * 是安装时被有意剥离的，卸载必须能把它们还原回来。
+ */
+function backupAgentsLooksDirty(text) {
+  if (!text) return false;
+  return text.includes(`${AGENTS_TAG}:BEGIN -->`);
+}
+
+/**
+ * 从已注入的 AGENTS.md 里精确剥离本 Kit 的托管块，还原出用户原文。
+ * 与 mergeMarkedBlock 的 replace 路径严格互逆（已验证逐字节还原）。
+ */
+function stripManagedBlock(text) {
+  const bTag = `${AGENTS_TAG}:BEGIN -->`;
+  const eTag = `${AGENTS_TAG}:END -->`;
+  const i = text.indexOf(bTag);
+  if (i < 0) return text;
+  const j = text.indexOf(eTag, i + bTag.length);
+  if (j < 0) return text; // 不配对：不动，交由备份兜底
+  const head = text.slice(0, i).replace(/[ \t]+$/, '').replace(/(\r?\n)+$/, '');
+  const tail = text.slice(j + eTag.length).replace(/^(\r?\n)+/, '').replace(/^[ \t]+/, '');
+  return head + (head && tail ? '\n\n' : '') + tail;
+}
+
 function runUninstall() {
   const { opts, codexHome } = ctx;
   const stamp = ts();
@@ -992,15 +1084,99 @@ function runUninstall() {
   const safety = path.join(codexHome, 'backups', `pre-uninstall-${stamp}`);
   mkdirp(safety);
 
-  // [1/5] 定位最近一次安装备份
+  // [1/5] 定位安装备份
   info('[1/5] 定位安装备份');
   const backupDir = findLatestBackup(codexHome);
-  if (backupDir) info(`  安装备份: ${backupDir}`);
+  const pristineDir = findPristineBackup(codexHome);
+  if (backupDir) info(`  最近安装备份: ${backupDir}`);
   else warn('没有 eni-solo-*-replica-* 备份，只做管理块剥离兜底');
+  if (pristineDir && pristineDir !== backupDir) {
+    info(`  最初装前备份: ${pristineDir}`);
+    info('  （重复安装会产出脏备份；AGENTS.md/hooks.json/config.toml 一律以最初装前态为准）');
+  }
+  // 回滚源：优先「最初装前态」，缺失才退回最新备份
+  const srcDir = pristineDir || backupDir;
 
+  // [2/5] 回滚 + 清理本 Kit 自建项
+  //
+  // 两条独立路径，缺一不可（真实缺陷修复）：
+  //   A. **删除本 Kit 自建的文件/目录** —— 首次安装时这些项在备份里根本不存在，
+  //      旧版只做「从备份恢复」，restoreItem 对不存在的 src 直接 return，
+  //      于是 hooks/（马）、tools/（工具）、prompts/ 会永久残留。
+  //   B. **AGENTS.md 用「剥离托管块」还原，而不是照抄备份** —— 重复安装会产出
+  //      脏备份（里面已是注入态），照抄等于把注入复制回来。
+  info('[2/5] 回滚 + 清理本 Kit 自建项');
+
+  // ── A. 先删本 Kit 自建项（卸载语义：把装进去的东西拿走）
+  const selfCreated = [
+    ['hooks', 'hook 脚本目录'],
+    ['eni-solo', 'eni-solo 载荷目录'],
+    ['tools', 'tools 目录（shiyi_assembler.py 等）'],
+    [path.join('slo-runtime', 'eni-solo'), 'slo-runtime 载荷'],
+    [path.join('prompts', 'eni-solo-v4.0.0.md'), '注入 prompt'],
+  ];
+  // models.json：只在「装前没有」时删除（装前就有则交给下面的 restoreItem 还原）
+  if (!(srcDir && exists(path.join(srcDir, 'models.json')))) {
+    selfCreated.push(['models.json', '本 Kit 部署的默认模型清单']);
+  }
+  for (const [rel, label] of selfCreated) {
+    const p = path.join(codexHome, rel);
+    if (!exists(p)) continue;
+    // 先留一份到保险副本，便于人工核对
+    const safeDst = path.join(safety, rel);
+    mkdirp(path.dirname(safeDst));
+    if (DRY) dryLog(`备份并删除: ${p} -> ${safeDst}`);
+    else { copyDirF(p, safeDst); rmrfF(p); }
+    ok(`已删除本 Kit 自建项: ${rel}（${label}）`);
+  }
+
+  // ── B. AGENTS.md：还原到「最初装前态」
+  //
+  // 优先级（真实缺陷修复）：
+  //   1) 最初装前备份（干净）—— **逐字节还原**。它才含被安装有意剥离的 Legacy 旧块，
+  //      剥离托管块是找不回那些块的。
+  //   2) 无可用备份时，退回「剥离托管块」—— 至少能去掉注入面。
+  // 当前文件在覆盖前一律先存进保险副本，用户装后的编辑不会丢。
+  const agentsPath = path.join(codexHome, 'AGENTS.md');
+  if (exists(agentsPath)) {
+    const cur = readText(agentsPath);
+    const stripped = stripManagedBlock(cur);
+    const bkPath = srcDir ? path.join(srcDir, 'AGENTS.md') : null;
+    let restored = null;
+    let how = null;
+    if (bkPath && exists(bkPath)) {
+      const bk = readText(bkPath);
+      if (backupAgentsLooksDirty(bk)) {
+        warn('  备份里的 AGENTS.md 也是注入态（脏备份）—— 改走剥离路径');
+      } else {
+        restored = bk;
+        how = '从最初装前备份逐字节还原';
+        if (stripped !== bk) {
+          info('  [i] 备份含安装时被剥离的旧块（Legacy）—— 以备份为准，同时保留当前版本到保险副本');
+        }
+      }
+    }
+    if (restored === null) {
+      if (stripped !== cur) { restored = stripped; how = '剥离托管块（无可用装前备份）'; }
+    }
+    if (restored === null) {
+      info('  [i] AGENTS.md 无可还原内容（无托管块、无装前备份）—— 保持原样');
+    } else if (restored === cur) {
+      info('  [i] AGENTS.md 已是最初装前态，无需改动');
+    } else {
+      if (DRY) dryLog(`还原 AGENTS.md（${how}）`);
+      else {
+        copyFileF(agentsPath, path.join(safety, 'AGENTS.md'));
+        writeFileUtf8(agentsPath, restored);
+      }
+      ok(`AGENTS.md 已还原（${how}，${cur.length} -> ${restored.length} 字符）`);
+    }
+  }
+
+  // ── C. 其余项：备份里有的按备份还原（仅当备份存在且为装前态）
   const restoreItem = (name, srcName) => {
-    if (!backupDir) return;
-    const src = path.join(backupDir, srcName === undefined ? name : srcName);
+    if (!srcDir) return;
+    const src = path.join(srcDir, srcName === undefined ? name : srcName);
     const dst = path.join(codexHome, name);
     if (!exists(src)) return;
     if (exists(dst)) {
@@ -1013,40 +1189,67 @@ function runUninstall() {
     if (DRY) dryLog(`回滚: ${src} -> ${dst}`); else copyDirF(src, dst);
     ok(`已回滚: ${name}`);
   };
-
-  // [2/5] 按备份回滚
-  info('[2/5] 按备份回滚');
-  restoreItem('AGENTS.md');
-  restoreItem('hooks.json');
-  restoreItem('hooks');
-  restoreItem(path.join('prompts', 'eni-solo-v4.0.0.md'));
-  restoreItem('eni-solo');
-  // 备份目录里 slo-runtime-eni-solo -> slo-runtime/eni-solo
-  if (backupDir && exists(path.join(backupDir, 'slo-runtime-eni-solo'))) {
-    const dst = path.join(codexHome, 'slo-runtime', 'eni-solo');
-    if (exists(dst)) { mkdirp(path.join(safety, 'slo-runtime')); if (!DRY) copyDirF(dst, path.join(safety, 'slo-runtime', 'eni-solo')); rmrfF(dst); }
-    mkdirp(path.dirname(dst));
-    if (DRY) dryLog(`回滚: slo-runtime-eni-solo -> ${dst}`); else copyDirF(path.join(backupDir, 'slo-runtime-eni-solo'), dst);
-    ok('已回滚: slo-runtime/eni-solo');
-  }
   restoreItem('models.json');
   restoreItem('ColdBrew');
-  restoreItem('tools');
 
   // skills 逐目录回滚：备份目录里除已知项外的条目（目录或符号链接）都视为技能目录。
   // 注意（相对 ps1 的修正）：install 把技能备份到 backup/<name>（扁平），而 Uninstall.ps1
   // 从 backup/skills/<name> 取 —— 那个路径从不存在，Windows 版实际不会恢复技能。
   // mac 版按真实落盘布局从 backup/<name> 还原到 <codexHome>/skills/<name>。
-  if (backupDir) {
-    const FIXED = new Set(['hooks', 'eni-solo', 'slo-runtime-eni-solo', 'ColdBrew', 'tools']);
+  if (srcDir) {
+    const FIXED = new Set(['hooks', 'eni-solo', 'slo-runtime-eni-solo', 'ColdBrew', 'tools', 'prompts']);
     let names = [];
-    try { names = fs.readdirSync(backupDir).sort(); } catch { /* ignore */ }
+    try { names = fs.readdirSync(srcDir).sort(); } catch { /* ignore */ }
     for (const d of names) {
       if (FIXED.has(d)) continue;
-      const st = safeLstat(path.join(backupDir, d));
+      const st = safeLstat(path.join(srcDir, d));
       if (!st) continue;
       if (!st.isDirectory() && !st.isSymbolicLink()) continue; // 跳过 config.toml/hooks.json/models.json 等文件
       restoreItem(path.join('skills', d), d);
+    }
+  }
+
+  // 兜底：删除本 Kit **新装**的技能（最初装前备份里没有的那些）
+  //
+  // 真实缺陷：旧版只「还原备份里有的技能」，而本 Kit 装进去的 107 个技能在装前
+  // 备份里根本不存在 → 卸载后全部残留（用户实测残留 91 个 eni-*）。
+  // 判据用包内 materials/skills 名单（即使 manifest 被 --purge 清掉也能清理）。
+  const skillsRoot = path.join(codexHome, 'skills');
+  const kitSkills = listDirs(path.join(ctx.mat, 'skills'));
+  if (exists(skillsRoot)) {
+    // 1) 清分阶段临时目录
+    let names = [];
+    try { names = fs.readdirSync(skillsRoot); } catch { /* ignore */ }
+    for (const n of names) {
+      if (n.startsWith('.eni-solo-stage-')) rmrfF(path.join(skillsRoot, n));
+    }
+    // 2) 删本 Kit 新装的技能
+    let removedSkills = 0;
+    for (const s of kitSkills) {
+      const dst = path.join(skillsRoot, s);
+      if (!exists(dst)) continue;
+      const inBackup = srcDir && exists(path.join(srcDir, s));
+      if (inBackup) continue; // 装前就有 → 交给上面的回滚逻辑还原
+      const safeDst = path.join(safety, 'skills', s);
+      mkdirp(path.dirname(safeDst));
+      if (DRY) dryLog(`删除本 Kit 新装技能: ${s}`);
+      else { copyDirF(dst, safeDst); rmrfF(dst); }
+      removedSkills += 1;
+    }
+    if (removedSkills > 0) ok(`已删除本 Kit 新装的技能: ${removedSkills} 个（保留用户原有技能）`);
+  }
+
+  // 兜底：回收本 Kit 建出来的空目录（装前没有、清空后已无内容的）
+  for (const rel of ['hooks', 'prompts', 'tools', 'eni-solo', 'slo-runtime']) {
+    const p = path.join(codexHome, rel);
+    if (!exists(p)) continue;
+    if (srcDir && exists(path.join(srcDir, rel))) continue; // 装前就有 → 保留
+    let kids = [];
+    try { kids = fs.readdirSync(p); } catch { continue; }
+    if (kids.length === 0) {
+      if (DRY) dryLog(`删除空目录: ${p}`);
+      else rmrfF(p);
+      ok(`已删除本 Kit 建出的空目录: ${rel}`);
     }
   }
 
@@ -1085,24 +1288,57 @@ function runUninstall() {
   }
 
   // [4/5] hooks.json 注入条目移除
+  //
+  // 真实缺陷修复：旧版只「过滤掉本 Kit 条目」，于是留下一个空壳文件：
+  //   { "description": "Codex lifecycle hooks (eni-solo managed hooks)",
+  //     "hooks": { "UserPromptSubmit": [], "PreCompact": [], "SessionStart": [] } }
+  // 用户看到的是「卸载完了 hooks.json 还在」。正确语义分两种：
+  //   · 装前已有 hooks.json（备份里有）→ 整文件还原成装前状态；
+  //   · 装前没有（本 Kit 新建）→ 过滤后若已无任何有效条目，直接删掉文件。
   info('[4/5] hooks.json 注入条目移除');
   const hooksPath = path.join(codexHome, 'hooks.json');
   if (exists(hooksPath)) {
     try {
-      const hj = JSON.parse(stripBom(readText(hooksPath)));
-      let removed = 0;
-      if (hj && hj.hooks && typeof hj.hooks === 'object') {
-        for (const evt of Object.keys(hj.hooks)) {
-          const kept = arrOf(hj.hooks[evt]).filter((e) => {
-            if (KIT_ENTRY_RE.test(JSON.stringify(e))) { removed++; return false; }
-            return true;
-          });
-          hj.hooks[evt] = kept;
+      const bkHooks = srcDir ? path.join(srcDir, 'hooks.json') : null;
+      if (bkHooks && exists(bkHooks)) {
+        // 装前有：整文件还原（同时兜底剥掉万一混入的托管条目）
+        let hj = JSON.parse(stripBom(readText(bkHooks)));
+        if (hj && hj.hooks && typeof hj.hooks === 'object') {
+          for (const evt of Object.keys(hj.hooks)) {
+            hj.hooks[evt] = arrOf(hj.hooks[evt]).filter((e) => e != null && !KIT_ENTRY_RE.test(JSON.stringify(e)));
+          }
         }
+        if (DRY) dryLog(`从备份还原 ${hooksPath}`);
+        else { copyFileF(hooksPath, path.join(safety, 'hooks.json')); writeFileUtf8(hooksPath, JSON.stringify(hj, null, 2) + '\n'); }
+        ok('hooks.json 已还原为装前状态');
+      } else {
+        // 装前没有：过滤本 Kit 条目，若已无内容则删文件
+        const hj = JSON.parse(stripBom(readText(hooksPath)));
+        let removed = 0;
+        if (hj && hj.hooks && typeof hj.hooks === 'object') {
+          for (const evt of Object.keys(hj.hooks)) {
+            const kept = arrOf(hj.hooks[evt]).filter((e) => {
+              if (KIT_ENTRY_RE.test(JSON.stringify(e))) { removed++; return false; }
+              return true;
+            });
+            hj.hooks[evt] = kept;
+          }
+        }
+        const leftover = hj && hj.hooks && typeof hj.hooks === 'object'
+          ? Object.values(hj.hooks).some((v) => arrOf(v).length > 0)
+          : false;
+        const ours = /eni-solo managed hooks/i.test(String((hj && hj.description) || ''));
+        if (!leftover) {
+          if (DRY) dryLog(`删除本 Kit 新建的 ${hooksPath}`);
+          else { copyFileF(hooksPath, path.join(safety, 'hooks.json')); fs.rmSync(hooksPath, { force: true }); }
+          ok(`hooks.json 已删除（本 Kit 新建、已无有效条目；移除注入条目 ${removed} 条）`);
+        } else {
+          if (DRY) dryLog(`写回 ${hooksPath}（移除 ${removed} 条）`);
+          else writeFileUtf8(hooksPath, JSON.stringify(hj, null, 2) + '\n');
+          ok(`移除注入条目: ${removed}（保留了第三方钩子）`);
+        }
+        if (ours && leftover) warn('  description 仍为本 Kit 文案但尚有第三方钩子，保留文件');
       }
-      if (DRY) dryLog(`写回 ${hooksPath}（移除 ${removed} 条）`);
-      else writeFileUtf8(hooksPath, JSON.stringify(hj, null, 2) + '\n');
-      ok(`移除注入条目: ${removed}`);
     } catch (e) {
       warn(`hooks.json 清理失败（跳过）: ${e.message}`);
     }

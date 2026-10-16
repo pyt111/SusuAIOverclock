@@ -42,6 +42,7 @@ CASES="$ROOT/cases"
 CASE="$CASES/caseA"
 CASE_B="$CASES/caseB"
 DRY="$CASES/caseC"
+CASE_D="$CASES/caseD"
 LOG="$ROOT/selftest.log"
 
 PASS_N=0; FAIL_N=0
@@ -231,22 +232,21 @@ assert_eq "$(sha "$CASE/hooks.json")" "$HJ1" "重装 hooks.json 逐字节不变�
 assert_eq "$(grep -c 'ENI-SOLO-AGENTS:BEGIN' "$CASE/AGENTS.md")" "1" "重装后新块未重复插入"
 
 # ─────────────────────────────────────────────────────────────
-echo "== 3. 卸载（增量场景：恢复最近一次安装备份）=="
+echo "== 3. 卸载（增量场景：恢复到最初装前态）=="
 if uni "$CASE" > "$LOG" 2>&1; then pass "uninstall 退出码 0"; else tail -30 "$LOG"; fail "uninstall 退出码非 0"; fi
 BK2="$(ls -d "$CASE"/backups/eni-solo-*-replica-* 2>/dev/null | sort | tail -1)"
-assert_eq "$(sha "$CASE/AGENTS.md")" "$(sha "$BK2/AGENTS.md")" "AGENTS.md 已按最近备份回滚（不丢数据）"
-# hooks.json：按最近备份回滚 → 再执行 [4] 步剥离本 Kit 条目（ps1 同语义）。
-# 断言：卸载结果 == 「备份内容去掉本 Kit 条目」，即用户条目零丢失、Kit 条目清零。
+# 语义（真实缺陷修复）：卸载必须恢复到**最初装前态**，而不是"最近一次安装备份"。
+# 二次安装产出的备份本身已是注入态（脏备份），照它回滚等于把注入复制回来。
+assert_eq "$(sha "$CASE/AGENTS.md")" "$(sha "$ROOT/fixture-A-AGENTS.md")" "AGENTS.md 已恢复到最初装前态（逐字节，含被剥离的 Legacy 块）"
+# hooks.json：恢复为装前状态（本 Kit 条目清零、用户条目零丢失）。
 assert_eq "$(node -e '
 const fs=require("fs");
-const cur=fs.readFileSync(process.argv[1],"utf8");
-const bak=JSON.parse(fs.readFileSync(process.argv[2],"utf8"));
-for (const k of Object.keys(bak.hooks)) {
-  bak.hooks[k]=bak.hooks[k].filter(e=>!/ishii_auto_route|slo-runtime-hook/.test(JSON.stringify(e)));
-}
-const want=JSON.stringify(bak,null,2)+"\n";
-process.stdout.write(cur===want?"1":"0");
-' "$CASE/hooks.json" "$BK2/hooks.json")" "1" "hooks.json 已按最近备份回滚（Kit 条目剥离后与用户内容一致）"
+const cur=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));
+const all=JSON.stringify(cur);
+const kit=/ishii_auto_route|slo-runtime-hook/.test(all);
+const third=all.includes("third-party-hook.py");
+process.stdout.write([third,!kit].map(x=>x?1:0).join(","));
+' "$CASE/hooks.json")" "1,1" "hooks.json 已恢复为装前状态（第三方钩子保留、本 Kit 条目清零）"
 assert_eq "$(node -e '
 const j=require(process.argv[1]);
 process.stdout.write(JSON.stringify(j).includes("third-party-hook.py")?"1":"0");
@@ -288,6 +288,38 @@ assert_ok "$([ -f "$CASE_B/skills/$FIRST_SKILL/sentinel.txt" ] && echo 1 || echo
 assert_ok "$([ -L "$CASE_B/skills/$SECOND_SKILL" ] && echo 1 || echo 0)" "符号链接技能已按链接原样还原"
 assert_eq "$(readlink "$CASE_B/skills/$SECOND_SKILL" 2>/dev/null || true)" "$ROOT/link-target/$SECOND_SKILL" "还原后的符号链接仍指向原目标"
 assert_ok "$([ ! -e "$CASE_B/skills/$SECOND_SKILL/keep.txt" ] || [ -L "$CASE_B/skills/$SECOND_SKILL" ] && echo 1 || echo 0)" "还原的链接未被实体化为目录副本"
+
+# 卸载彻底性（三个真实缺陷的回归断言）：
+#   ① 本 Kit 自建的 hooks/ tools/ eni-solo/ prompts/ 必须被删掉（旧版只"从备份恢复"，首次安装后卸载会残留）
+#   ② hooks.json 不得留 eni-solo 空壳（旧版只过滤条目，留下 description 空文件）
+#   ③ 脏备份不得把注入复制回来（重复安装 → 备份里已是注入态 → 卸载等于还原注入）
+echo "  -- 卸载彻底性 --"
+assert_ok "$([ ! -e "$CASE_B/hooks" ] && echo 1 || echo 0)" "卸载后 hooks/ 目录已删除（不再残留 ishii_auto_route.py）"
+assert_ok "$([ ! -e "$CASE_B/tools" ] && echo 1 || echo 0)" "卸载后 tools/ 目录已删除"
+assert_ok "$([ ! -e "$CASE_B/eni-solo" ] && echo 1 || echo 0)" "卸载后 eni-solo/ 已删除"
+assert_ok "$([ ! -e "$CASE_B/slo-runtime/eni-solo" ] && echo 1 || echo 0)" "卸载后 slo-runtime/eni-solo 已删除"
+assert_eq "$(ls "$CASE_B"/prompts/eni-solo-*.md 2>/dev/null | wc -l | tr -d ' ')" "0" "卸载后注入 prompt 已删除"
+assert_ok "$([ ! -e "$CASE_B/prompts" ] && echo 1 || echo 0)" "卸载后 prompts/ 空目录已回收"
+assert_ok "$([ ! -e "$CASE_B/slo-runtime" ] && echo 1 || echo 0)" "卸载后 slo-runtime/ 空目录已回收"
+assert_eq "$(grep -c 'eni-solo managed hooks' "$CASE_B/hooks.json" 2>/dev/null || true)" "0" "hooks.json 无 eni-solo 空壳残留"
+assert_eq "$(grep -c 'ENI-SOLO-AGENTS:BEGIN' "$CASE_B/AGENTS.md" 2>/dev/null || true)" "0" "AGENTS.md 无托管块残留"
+# 夹具装前有 models.json（用户自建）→ 卸载必须保留/还原用户那份，绝不能删
+assert_ok "$(grep -q 'my-custom-model' "$CASE_B/models.json" 2>/dev/null && echo 1 || echo 0)" "卸载后 models.json 保留用户原有内容（装前已存在）"
+
+# ③ 脏备份回归：同一目录连续装两次 → 再卸载，AGENTS.md 必须回到夹具原文
+echo "  -- 脏备份回归（连装两次再卸载）--"
+make_fixture "$CASE_D" D
+FIX_MD_D="$ROOT/fixture-D-AGENTS.md"; cp "$CASE_D/AGENTS.md" "$FIX_MD_D"
+if ins "$CASE_D" > "$LOG" 2>&1; then pass "caseD 首次安装退出码 0"; else tail -30 "$LOG"; fail "caseD 首次安装失败"; fi
+if ins "$CASE_D" > "$LOG" 2>&1; then pass "caseD 二次安装退出码 0"; else tail -30 "$LOG"; fail "caseD 二次安装失败"; fi
+assert_ok "$(grep -q 'ENI-SOLO-AGENTS:BEGIN' "$CASE_D/AGENTS.md" && echo 1 || echo 0)" "caseD 二次安装后托管块在位"
+assert_eq "$(grep -c 'ENI-SOLO-AGENTS:BEGIN' "$CASE_D/backups"/eni-solo-*-replica-*/AGENTS.md 2>/dev/null | grep -v ':0$' | wc -l | tr -d ' ')" "0" "所有安装备份里的 AGENTS.md 都是干净原始态（无脏备份）"
+if uni "$CASE_D" > "$LOG" 2>&1; then pass "caseD 卸载退出码 0"; else tail -30 "$LOG"; fail "caseD 卸载失败"; fi
+assert_eq "$(sha "$CASE_D/AGENTS.md")" "$(sha "$FIX_MD_D")" "连装两次再卸载：AGENTS.md 逐字节回到夹具原文（脏备份已修）"
+# 只查本 Kit 的注入面；夹具原文自带的 WORKSPACE-CONTRACT 等 Legacy 块属于用户内容，
+# 安装时被有意剥离、卸载时必须还原回来（所以不能把它们算作"残留"）。
+assert_eq "$(grep -c 'ENI-SOLO-AGENTS' "$CASE_D/AGENTS.md" 2>/dev/null || true)" "0" "连装两次再卸载：本 Kit 托管块零残留"
+assert_ok "$([ ! -e "$CASE_D/hooks/ishii_auto_route.py" ] && echo 1 || echo 0)" "连装两次再卸载：hook 脚本已清除"
 
 # ─────────────────────────────────────────────────────────────
 echo "== 6. dry-run 零写入 =="
